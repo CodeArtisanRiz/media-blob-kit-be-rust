@@ -97,6 +97,18 @@ async fn main() {
             }
         }
         None => {
+            // Auto-run pending database migrations on startup if enabled
+            if config.auto_migrate {
+                tracing::info!("Checking and running pending database migrations...");
+                if let Err(e) = Migrator::up(&db, None).await {
+                    tracing::error!("Failed to run database migrations: {}", e);
+                } else {
+                    tracing::info!("Database migrations checked/applied successfully");
+                }
+            } else {
+                tracing::info!("Auto-migration disabled via AUTO_MIGRATE=false");
+            }
+
             let broadcaster = services::broadcaster::Broadcaster::new(500);
 
             // build our application using the routes module

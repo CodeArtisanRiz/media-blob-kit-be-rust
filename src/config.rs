@@ -13,6 +13,7 @@ pub struct Config {
     pub s3_bucket_name: String,
     pub s3_endpoint: Option<String>,
     pub worker_concurrency: usize,
+    pub auto_migrate: bool,
     pub su_username: Option<String>,
     pub su_password: Option<String>,
 }
@@ -51,6 +52,10 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1),
+            auto_migrate: env::var("AUTO_MIGRATE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(true),
             su_username,
             su_password,
         }

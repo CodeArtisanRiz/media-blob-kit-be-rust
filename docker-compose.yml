@@ -1,9 +1,0 @@
-services:
-  app:
-    build: .
-    container_name: media-blob-kit
-    ports:
-      - "4000:3000"
-    env_file:
-      - .env
-    restart: unless-stopped

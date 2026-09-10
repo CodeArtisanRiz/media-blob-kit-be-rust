@@ -238,7 +238,7 @@ pub async fn job_events(
     axum::Extension(broadcaster): axum::Extension<Broadcaster>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let rx = broadcaster.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|msg| async move {
+    let stream = BroadcastStream::new(rx).filter_map(|msg| {
         match msg {
             Ok(job) => {
                 let data = serde_json::to_string(&job).ok()?;

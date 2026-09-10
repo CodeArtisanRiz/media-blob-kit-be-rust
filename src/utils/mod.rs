@@ -43,6 +43,7 @@ pub fn format_variants_json(variants_json: &serde_json::Value) -> serde_json::Va
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::s3::S3Service;
 
     #[test]
     fn test_sanitize_bucket_name() {

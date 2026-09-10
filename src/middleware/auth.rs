@@ -29,23 +29,34 @@ pub async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Extract Authorization header
-    let auth_header = req
+    // Extract Authorization header or query parameter token (for SSE/EventSource)
+    let token = if let Some(auth_header) = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    // Check Bearer prefix
-    if !auth_header.starts_with("Bearer ") {
+    {
+        if !auth_header.starts_with("Bearer ") {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        auth_header[7..].to_string()
+    } else if let Some(query_str) = req.uri().query() {
+        // Fallback to ?token= query parameter (for browser EventSource connections)
+        let token_param = query_str.split('&').find_map(|pair| {
+            let mut parts = pair.split('=');
+            if parts.next() == Some("token") {
+                parts.next().map(|v| v.to_string())
+            } else {
+                None
+            }
+        });
+        token_param.ok_or(StatusCode::UNAUTHORIZED)?
+    } else {
         return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    let token = &auth_header[7..]; // Remove "Bearer " prefix
+    };
 
     // Decode and validate JWT
     let token_data = decode::<Claims>(
-        token,
+        &token,
         &DecodingKey::from_secret(get_config().jwt_secret.as_ref()),
         &Validation::default(),
     )

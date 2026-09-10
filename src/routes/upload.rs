@@ -13,7 +13,8 @@ use crate::services::s3::S3Service;
 
 #[derive(Deserialize, utoipa::IntoParams)]
 pub struct UploadImageQuery {
-    #[param(inline, description = "Comma-separated variant names to generate (e.g. 'thumbnail,card'). Omit to generate all project variants.")]
+    /// Comma-separated variant names to generate (e.g. 'thumbnail,card'). Omit to generate all project variants.
+    #[param(inline)]
     pub variants: Option<String>,
 }
 

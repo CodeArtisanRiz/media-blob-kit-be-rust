@@ -432,3 +432,46 @@ pub async fn sync_variants(
         }
     }
 }
+
+#[utoipa::path(
+    post,
+    path = "/projects/{id}/restore",
+    params(
+        ("id" = Uuid, Path, description = "Project ID")
+    ),
+    responses(
+        (status = 200, description = "Project restored successfully", body = ProjectResponse),
+        (status = 404, description = "Project not found or not soft-deleted"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    ),
+    tag = "Project Management"
+)]
+pub async fn restore_project(
+    State(db): State<DatabaseConnection>,
+    auth_user: axum::Extension<AuthUser>,
+    Path(project_id): Path<Uuid>,
+) -> Result<Json<ProjectResponse>, AppError> {
+    let project = Project::find_by_id(project_id)
+        .filter(project::Column::OwnerId.eq(auth_user.id))
+        .filter(project::Column::DeletedAt.is_not_null())
+        .one(&db)
+        .await?;
+
+    match project {
+        Some(p) => {
+            let mut active_project = p.into_active_model();
+            active_project.deleted_at = Set(None);
+            active_project.updated_at = Set(chrono::Utc::now().naive_utc());
+            let updated = active_project.update(&db).await?;
+
+            println!("Project | POST /projects/{}/restore | user={} | res=200", project_id, auth_user.username);
+            Ok(Json(ProjectResponse::from(updated)))
+        }
+        None => {
+            Err(AppError::NotFound("Project not found or not in trash".to_string()))
+        }
+    }
+}

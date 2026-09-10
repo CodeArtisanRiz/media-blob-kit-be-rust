@@ -4,7 +4,7 @@ mod users;
 mod projects;
 mod api_keys;
 pub mod upload;
-mod jobs;
+pub mod jobs;
 mod files;
 
 use axum::{
@@ -41,6 +41,7 @@ use crate::services::broadcaster::Broadcaster;
         projects::get_project,
         projects::update_project,
         projects::delete_project,
+        projects::restore_project,
         projects::sync_variants,
         // API Key endpoints
         api_keys::create_api_key,
@@ -91,10 +92,9 @@ use crate::services::broadcaster::Broadcaster;
             upload::ImageUploadResponse,
             // Job schemas
             jobs::JobResponse,
-            jobs::JobResponse,
-        jobs::PaginatedProjectJobsResponse,
-        // File schemas
-        files::FileResponse,
+            jobs::PaginatedProjectJobsResponse,
+            // File schemas
+            files::FileResponse,
         )
     ),
     tags(
@@ -155,6 +155,7 @@ pub fn create_routes(db: DatabaseConnection, broadcaster: Broadcaster) -> Router
         .route("/projects/{id}", get(projects::get_project))
         .route("/projects/{id}", axum::routing::put(projects::update_project))
         .route("/projects/{id}", delete(projects::delete_project))
+        .route("/projects/{id}/restore", post(projects::restore_project))
         .route("/projects/{id}/sync-variants", post(projects::sync_variants))
         .route("/projects/{id}/keys", post(api_keys::create_api_key))
         .route("/projects/{id}/keys", get(api_keys::list_api_keys))
@@ -188,6 +189,7 @@ pub fn create_routes(db: DatabaseConnection, broadcaster: Broadcaster) -> Router
             Router::new()
                 .route("/upload/file", post(upload::upload_file))
                 .route("/upload/image", post(upload::upload_image))
+                .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024))
                 .route("/jobs", get(jobs::list_jobs))
                 .layer(axum::middleware::from_fn_with_state(db.clone(), crate::middleware::api_key::api_key_auth))
         )

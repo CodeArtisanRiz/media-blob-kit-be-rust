@@ -14,21 +14,23 @@ use crate::models::settings::VariantConfig;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::services::broadcaster::Broadcaster;
+use crate::routes::jobs::JobResponse;
+
 #[derive(Clone)]
 pub struct Worker {
     db: DatabaseConnection,
     s3: S3Service,
     semaphore: Arc<Semaphore>,
+    broadcaster: Broadcaster,
 }
 
-
-
 impl Worker {
-    pub async fn new(db: DatabaseConnection) -> Self {
+    pub async fn new(db: DatabaseConnection, broadcaster: Broadcaster) -> Self {
         let s3 = S3Service::new().await;
         let config = crate::config::get_config();
         let semaphore = Arc::new(Semaphore::new(config.worker_concurrency));
-        Self { db, s3, semaphore }
+        Self { db, s3, semaphore, broadcaster }
     }
 
     pub async fn run(&self) {
@@ -119,6 +121,9 @@ impl Worker {
         // Commit transaction to release lock and save 'processing' state
         txn.commit().await.map_err(|e| e.to_string())?;
 
+        // Broadcast processing status
+        self.broadcaster.send(JobResponse::from(job_model.clone()));
+
         Ok(Some(job_model))
     }
 
@@ -134,8 +139,8 @@ impl Worker {
                 let mut job_active: job::ActiveModel = job_model.into();
                 job_active.status = Set("completed".to_string());
                 job_active.updated_at = Set(chrono::Utc::now().naive_utc());
-                if let Err(e) = job_active.update(&self.db).await {
-                    eprintln!("Failed to update job status to completed: {}", e);
+                if let Ok(updated) = job_active.update(&self.db).await {
+                    self.broadcaster.send(JobResponse::from(updated));
                 }
             },
             Err(e) => {
@@ -148,8 +153,8 @@ impl Worker {
                     "original_payload": payload
                 }));
                 job_active.updated_at = Set(chrono::Utc::now().naive_utc());
-                if let Err(e) = job_active.update(&self.db).await {
-                    eprintln!("Failed to update job status to failed: {}", e);
+                if let Ok(updated) = job_active.update(&self.db).await {
+                    self.broadcaster.send(JobResponse::from(updated));
                 }
             }
         }

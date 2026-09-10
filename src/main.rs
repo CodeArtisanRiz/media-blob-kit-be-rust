@@ -97,8 +97,10 @@ async fn main() {
             }
         }
         None => {
+            let broadcaster = services::broadcaster::Broadcaster::new(500);
+
             // build our application using the routes module
-            let app = create_routes(db.clone())
+            let app = create_routes(db.clone(), broadcaster.clone())
                 .layer(tower_http::cors::CorsLayer::permissive());
 
             // Auto-create superuser if configured
@@ -137,8 +139,9 @@ async fn main() {
 
             // Spawn background worker
             let worker_db = db.clone();
+            let worker_broadcaster = broadcaster.clone();
             tokio::spawn(async move {
-                let worker = services::worker::Worker::new(worker_db).await;
+                let worker = services::worker::Worker::new(worker_db, worker_broadcaster).await;
                 worker.run().await;
             });
 

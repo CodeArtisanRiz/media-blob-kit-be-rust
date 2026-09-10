@@ -18,6 +18,8 @@ use crate::middleware::role::require_su;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::services::broadcaster::Broadcaster;
+
 // Define the OpenAPI documentation
 #[derive(OpenApi)]
 #[openapi(
@@ -51,6 +53,7 @@ use utoipa_swagger_ui::SwaggerUi;
         // Jobs endpoints
         jobs::list_jobs,
         jobs::list_admin_jobs,
+        jobs::job_events,
         // File endpoints
         files::list_files,
         files::get_file,
@@ -138,7 +141,7 @@ impl utoipa::Modify for SecurityAddon {
     }
 }
 
-pub fn create_routes(db: DatabaseConnection) -> Router {
+pub fn create_routes(db: DatabaseConnection, broadcaster: Broadcaster) -> Router {
     // Swagger UI (stateless)  
     let swagger_router: Router = SwaggerUi::new("/swagger-ui")
         .url("/api-docs/openapi.json", ApiDoc::openapi())
@@ -158,6 +161,7 @@ pub fn create_routes(db: DatabaseConnection) -> Router {
         .route("/projects/{id}/keys/{key_id}", axum::routing::patch(api_keys::update_api_key))
         .route("/projects/{id}/keys/{key_id}", delete(api_keys::delete_api_key))
         .route("/admin/jobs", get(jobs::list_admin_jobs))
+        .route("/admin/jobs/events", get(jobs::job_events))
         .route("/files", get(files::list_files))
         .route("/files/{id}", get(files::get_file).delete(files::delete_file))
         .route("/files/{id}/content", get(files::get_file_content))
@@ -187,6 +191,7 @@ pub fn create_routes(db: DatabaseConnection) -> Router {
                 .route("/jobs", get(jobs::list_jobs))
                 .layer(axum::middleware::from_fn_with_state(db.clone(), crate::middleware::api_key::api_key_auth))
         )
+        .layer(axum::Extension(broadcaster))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(db);
     

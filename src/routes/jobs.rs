@@ -216,3 +216,41 @@ pub async fn list_admin_jobs(
 
     Ok(Json(result))
 }
+
+use axum::response::sse::{Event, Sse};
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+use std::convert::Infallible;
+use std::time::Duration;
+use crate::services::broadcaster::Broadcaster;
+
+#[utoipa::path(
+    get,
+    path = "/admin/jobs/events",
+    tag = "Jobs",
+    responses(
+        (status = 200, description = "SSE event stream of job status updates", content_type = "text/event-stream")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn job_events(
+    axum::Extension(broadcaster): axum::Extension<Broadcaster>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let rx = broadcaster.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|msg| async move {
+        match msg {
+            Ok(job) => {
+                let data = serde_json::to_string(&job).ok()?;
+                Some(Ok(Event::default().event("job_update").data(data)))
+            }
+            Err(_) => None,
+        }
+    });
+
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    )
+}

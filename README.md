@@ -207,6 +207,7 @@ If you prefer building and running manually without Docker Compose:
 | **Files** | `/files/{id}/content` | `GET` | Bearer JWT | Redirect to S3 presigned URL (supports `?variant=name`) |
 | **Jobs** | `/jobs` | `GET` | API Key | List background image processing jobs |
 | **Jobs** | `/admin/jobs` | `GET` | Bearer JWT | System-wide job monitoring for Admins |
+| **Jobs** | `/admin/jobs/events` | `GET` | Bearer JWT | Real-time SSE event stream for job status updates |
 
 ---
 

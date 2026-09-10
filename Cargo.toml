@@ -2,6 +2,7 @@
 name = "media-blob-kit"
 version = "0.1.0"
 edition = "2021"
+license = "AGPL-3.0-only"
 default-run = "media-blob-kit"
 
 [dependencies]

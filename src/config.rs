@@ -19,8 +19,11 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+        let host = env::var("HOST")
+            .or_else(|_| env::var("APP_HOST"))
+            .unwrap_or_else(|_| "0.0.0.0".to_string());
         let port = env::var("PORT")
+            .or_else(|_| env::var("APP_PORT"))
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3000);

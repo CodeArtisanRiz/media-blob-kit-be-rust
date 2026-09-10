@@ -1,3 +1,5 @@
+// Copyright (C) 2025 CodeArtisanRiz. Licensed under GNU AGPLv3.
+
 mod entities;
 mod routes;
 mod middleware;

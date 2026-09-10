@@ -3,7 +3,7 @@
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![Axum](https://img.shields.io/badge/axum-0.8-blue.svg)](https://github.com/tokio-rs/axum)
 [![SeaORM](https://img.shields.io/badge/sea--orm-1.1-orange.svg)](https://www.sea-ql.org/SeaORM/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
 **MediaBlobKit** is a high-performance async media storage and image processing microservice built with **Rust**, **Axum**, **SeaORM**, and **PostgreSQL**. It delivers secure multi-tenant file management, S3-compatible cloud storage integration, and background worker queues using PostgreSQL's `FOR UPDATE SKIP LOCKED`.
 
@@ -148,23 +148,40 @@ The server will listen on `http://localhost:3000` (or `HOST`:`PORT` configured i
 
 ## 🐳 Running with Docker
 
-Since **MediaBlobKit** compiles down to a single lightweight binary, Docker Compose is optional. You can build and run the application container directly.
+You can deploy **MediaBlobKit** using Docker Compose (single command) or direct Docker commands.
 
-### Build Docker Image
+### Option 1: Docker Compose (Recommended 1-Step Deployment)
 
-```bash
-docker build -t media-blob-kit-be-rust .
-```
-
-### Run Docker Container
+Build and start the application container in detached mode with a single command:
 
 ```bash
-docker run -d \
-  --name media-blob-app \
-  --env-file .env \
-  -p 3000:3000 \
-  media-blob-kit-be-rust
+docker compose up -d --build
 ```
+
+To stop the application container:
+
+```bash
+docker compose down
+```
+
+### Option 2: Direct Docker CLI (2-Step Deployment)
+
+If you prefer building and running manually without Docker Compose:
+
+1. **Build Docker Image**:
+   ```bash
+   docker build -t media-blob-kit-be-rust .
+   ```
+
+2. **Run Docker Container**:
+   ```bash
+   docker run -d \
+     --name media-blob-app \
+     --env-file .env \
+     -p 3000:3000 \
+     --restart unless-stopped \
+     media-blob-kit-be-rust
+   ```
 
 ---
 
@@ -218,4 +235,4 @@ cargo test
 
 ## 📄 License
 
-This project is licensed under the [MIT License](LICENSE).
+Copyright (C) 2025 CodeArtisanRiz. This project is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).

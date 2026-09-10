@@ -19,22 +19,21 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, error_message) = match &self {
             AppError::DatabaseError(e) => {
-                eprintln!("Database error: {}", e);
+                tracing::error!("Database error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
             }
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::InternalServerError(msg) => {
-                eprintln!("Internal server error: {}", msg);
+                tracing::error!("Internal server error: {}", msg);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
             }
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
         };
 
-        // Log all errors with status code
-        println!("Error | res={} | {}", status.as_u16(), error_message);
+        tracing::warn!(status = status.as_u16(), error = %error_message, "Application error");
 
         let body = Json(json!({
             "error": error_message,

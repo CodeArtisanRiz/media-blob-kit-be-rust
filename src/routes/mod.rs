@@ -187,6 +187,7 @@ pub fn create_routes(db: DatabaseConnection) -> Router {
                 .route("/jobs", get(jobs::list_jobs))
                 .layer(axum::middleware::from_fn_with_state(db.clone(), crate::middleware::api_key::api_key_auth))
         )
+        .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(db);
     
     // Merge Swagger UI (which has no state) with the rest

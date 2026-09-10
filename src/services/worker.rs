@@ -324,14 +324,9 @@ impl Worker {
             // Upload to S3
             self.s3.put_object(&s3_key, processed_data, &mime_type).await.map_err(|e| e.to_string())?;
             
-            // Store successful variant path (future proofing)
-            // Storing absolute key or URL? 
-            // Previous code calculated it on the fly in `get_file_content`.
-            // But storing it in `variants_json` is better.
-            // Let's store the full S3 Key or relative path.
-            // Consistency: store full S3 Key? Or just the URL?
-            // Let's store the S3 Key.
-            successful_variants.insert(variant_name, serde_json::Value::String(s3_key));
+            // Store successful variant full URL in variants_json
+            let variant_url = crate::utils::build_s3_url(&s3_key);
+            successful_variants.insert(variant_name, serde_json::Value::String(variant_url));
         }
 
         // Update File status AND variants_json

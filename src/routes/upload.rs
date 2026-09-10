@@ -1,15 +1,21 @@
 use axum::{
-    extract::{Multipart, State},
+    extract::{Multipart, State, Query},
     response::Json,
     Extension,
 };
 use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::entities::{file, job};
 use crate::error::AppError;
 use crate::middleware::api_key::ProjectContext;
 use crate::services::s3::S3Service;
+
+#[derive(Deserialize, utoipa::IntoParams)]
+pub struct UploadImageQuery {
+    #[param(inline, description = "Comma-separated variant names to generate (e.g. 'thumbnail,card'). Omit to generate all project variants.")]
+    pub variants: Option<String>,
+}
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct FileUploadResponse {
@@ -36,21 +42,6 @@ fn get_extension(filename: &str) -> String {
         .to_string()
 }
 
-#[utoipa::path(
-    post,
-    path = "/upload/file",
-    tag = "File Upload",
-    request_body(content = Vec<u8>, content_type = "multipart/form-data"),
-    responses(
-        (status = 200, description = "File uploaded successfully", body = FileUploadResponse),
-        (status = 400, description = "Bad Request"),
-        (status = 401, description = "Unauthorized"),
-        (status = 500, description = "Internal Server Error")
-    ),
-    security(
-        ("api_key" = [])
-    )
-)]
 // Helper to sanitize bucket name
 fn sanitize_bucket_name(name: &str) -> String {
     name.to_lowercase()
@@ -116,12 +107,7 @@ pub async fn upload_file(
             let saved_file = file.insert(&db).await.map_err(AppError::DatabaseError)?;
             
             // Construct URL
-            let config = crate::config::get_config();
-            let url = if let Some(endpoint) = &config.s3_endpoint {
-                format!("{}/{}/{}", endpoint, s3_service.bucket_name, s3_key)
-            } else {
-                format!("https://{}.s3.{}.amazonaws.com/{}", s3_service.bucket_name, config.aws_region, s3_key)
-            };
+            let url = crate::utils::build_s3_url(&s3_key);
 
             println!("Upload | POST /upload/file | project={} | file={} | res=200", project.name, saved_file.filename);
             return Ok(Json(FileUploadResponse {
@@ -142,6 +128,9 @@ pub async fn upload_file(
     post,
     path = "/upload/image",
     tag = "File Upload",
+    params(
+        ("variants" = Option<String>, Query, description = "Comma-separated list of variant names to generate (e.g. 'thumbnail,card')")
+    ),
     request_body(content = Vec<u8>, content_type = "multipart/form-data"),
     responses(
         (status = 200, description = "Image uploaded successfully", body = ImageUploadResponse),
@@ -156,9 +145,18 @@ pub async fn upload_file(
 pub async fn upload_image(
     State(db): State<DatabaseConnection>,
     Extension(project): Extension<ProjectContext>,
+    Query(query): Query<UploadImageQuery>,
     mut multipart: Multipart,
 ) -> Result<Json<ImageUploadResponse>, AppError> {
     let s3_service = S3Service::new().await;
+
+    // Parse requested variant filter (if specified)
+    let requested_set: Option<std::collections::HashSet<String>> = query.variants.as_deref().map(|s| {
+        s.split(',')
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect()
+    });
 
     while let Some(field) = multipart.next_field().await.map_err(|_| AppError::BadRequest("Invalid multipart data".to_string()))? {
         if field.name() == Some("file") {
@@ -185,11 +183,20 @@ pub async fn upload_image(
             // Upload Original to S3
             s3_service.put_object(&s3_key, data.to_vec(), &content_type).await?;
 
-            // Calculate future variant URLs
+            // Calculate future variant URLs (filtered by request if query param is set)
             let mut variants_map = serde_json::Map::new();
-            
+            let mut filtered_variants_config = std::collections::HashMap::new();
+
             if let Some(variants_config) = &project.settings.variants {
                 for (variant_name, config) in variants_config {
+                    if let Some(ref set) = requested_set {
+                        if !set.contains(variant_name) {
+                            continue;
+                        }
+                    }
+
+                    filtered_variants_config.insert(variant_name.clone(), config.clone());
+
                     // Determine extension for variant
                     let variant_ext = config.format.as_deref().unwrap_or(&ext);
                     let variant_ext = if variant_ext == "original" { &ext } else { variant_ext };
@@ -204,12 +211,7 @@ pub async fn upload_image(
                     );
 
                     // Construct URL
-                    let config = crate::config::get_config();
-                    let variant_url = if let Some(endpoint) = &config.s3_endpoint {
-                        format!("{}/{}/{}", endpoint, s3_service.bucket_name, variant_key)
-                    } else {
-                        format!("https://{}.s3.{}.amazonaws.com/{}", s3_service.bucket_name, config.aws_region, variant_key)
-                    };
+                    let variant_url = crate::utils::build_s3_url(&variant_key);
                     
                     variants_map.insert(variant_name.clone(), serde_json::Value::String(variant_url));
                 }
@@ -233,13 +235,13 @@ pub async fn upload_image(
 
             let saved_file = file.insert(&db).await.map_err(AppError::DatabaseError)?;
 
-            // Create Image Processing Job
+            // Create Image Processing Job with filtered variants
             let job = job::ActiveModel {
                 id: Set(Uuid::new_v4()),
                 file_id: Set(saved_file.id),
                 status: Set("pending".to_string()),
                 payload: Set(serde_json::json!({
-                    "variants": project.settings.variants
+                    "variants": filtered_variants_config
                 })),
                 created_at: Set(chrono::Utc::now().naive_utc()),
                 updated_at: Set(chrono::Utc::now().naive_utc()),
@@ -248,12 +250,7 @@ pub async fn upload_image(
             job.insert(&db).await.map_err(AppError::DatabaseError)?;
 
             // Construct URL
-            let config = crate::config::get_config();
-            let url = if let Some(endpoint) = &config.s3_endpoint {
-                format!("{}/{}/{}", endpoint, s3_service.bucket_name, s3_key)
-            } else {
-                format!("https://{}.s3.{}.amazonaws.com/{}", s3_service.bucket_name, config.aws_region, s3_key)
-            };
+            let url = crate::utils::build_s3_url(&s3_key);
 
             println!("Upload | POST /upload/image | project={} | file={} | res=200", project.name, file_id);
             return Ok(Json(ImageUploadResponse {

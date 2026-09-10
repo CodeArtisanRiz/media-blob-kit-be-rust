@@ -70,18 +70,14 @@ pub fn process_image(data: &[u8], config: &VariantConfig) -> Result<(Vec<u8>, St
 
     // 4. Encode with Quality
     let mut buffer = Cursor::new(Vec::new());
-    
-    // Note: The `image` crate's `write_to` doesn't always expose quality controls for all formats easily 
-    // in the generic API, but for JPEG/WebP/AVIF it often uses defaults or we can use specific encoders.
-    // For simplicity in this phase, we'll use the generic `write_to` which uses reasonable defaults,
-    // but for JPEG/WebP/AVIF we can try to respect the quality setting if we use specific encoders.
-    // However, `DynamicImage::write_to` is the most robust way to handle multiple formats.
-    // To support quality specifically, we might need to match on format.
+    let quality = config.quality.unwrap_or(80);
 
     match output_format {
-        // For now, use default quality. To support custom quality, we'd need to use specific Encoders
-        // e.g. JpegEncoder::new_with_quality(&mut buffer, quality)
-        // But for simplicity and compilation, we stick to write_to with default settings.
+        ImageFormat::Jpeg => {
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, quality);
+            img.write_with_encoder(encoder)
+                .map_err(|e| AppError::InternalServerError(format!("Failed to encode JPEG image: {}", e)))?;
+        }
         _ => {
             img.write_to(&mut buffer, output_format)
                 .map_err(|e| AppError::InternalServerError(format!("Failed to encode image: {}", e)))?;
@@ -89,4 +85,40 @@ pub fn process_image(data: &[u8], config: &VariantConfig) -> Result<(Vec<u8>, St
     }
 
     Ok((buffer.into_inner(), mime_type.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{RgbImage, ImageBuffer, Rgb};
+
+    fn create_test_image_png(width: u32, height: u32) -> Vec<u8> {
+        let img: RgbImage = ImageBuffer::from_pixel(width, height, Rgb([255, 0, 0]));
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut cursor = Cursor::new(&mut bytes);
+        img.write_to(&mut cursor, ImageFormat::Png).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn test_process_image_resize_and_format() {
+        let input_bytes = create_test_image_png(100, 100);
+        let config = VariantConfig {
+            format: Some("jpg".to_string()),
+            quality: Some(85),
+            width: Some(50),
+            height: Some(50),
+            max_width: None,
+            max_height: None,
+            fit: Some("contain".to_string()),
+        };
+
+        let (processed_data, mime) = process_image(&input_bytes, &config).expect("Image processing failed");
+        assert_eq!(mime, "image/jpeg");
+        assert!(!processed_data.is_empty());
+
+        let decoded = image::load_from_memory(&processed_data).expect("Failed to decode processed image");
+        assert_eq!(decoded.width(), 50);
+        assert_eq!(decoded.height(), 50);
+    }
 }

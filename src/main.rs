@@ -44,6 +44,15 @@ enum Commands {
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
+    
+    // Initialize structured tracing logger
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     // Initialize config
     let config = config::get_config();
     
@@ -138,8 +147,11 @@ async fn main() {
                 cleanup.run_scheduler().await;
             });
 
-            // run our app with hyper, listening globally on port 3000
-            let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+            // run our app listening on configured host and port
+            let addr = format!("{}:{}", config.host, config.port);
+            let listener = tokio::net::TcpListener::bind(&addr)
+                .await
+                .unwrap_or_else(|e| panic!("Failed to bind to {}: {}", addr, e));
             println!("Listening on {}", listener.local_addr().unwrap());
             axum::serve(listener, app).await.unwrap();
         }

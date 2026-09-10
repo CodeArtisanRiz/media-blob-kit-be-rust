@@ -188,4 +188,30 @@ impl S3Service {
 
         Ok(presigned_req.uri().to_string())
     }
+
+    pub fn get_public_url(&self, key: &str) -> String {
+        let config = get_config();
+        let key = key.trim_start_matches('/');
+        if let Some(endpoint) = &config.s3_endpoint {
+            let endpoint = endpoint.trim_end_matches('/');
+            format!("{}/{}/{}", endpoint, self.bucket_name, key)
+        } else {
+            format!("https://{}.s3.{}.amazonaws.com/{}", self.bucket_name, config.aws_region, key)
+        }
+    }
+
+    pub fn extract_s3_key(url_or_key: &str, bucket: &str) -> String {
+        let trimmed = url_or_key.trim();
+        if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+            return trimmed.to_string();
+        }
+
+        if let Some(idx) = trimmed.find(&format!("/{}/", bucket)) {
+            trimmed[idx + bucket.len() + 2..].to_string()
+        } else if let Ok(parsed) = url::Url::parse(trimmed) {
+            parsed.path().trim_start_matches('/').to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
 }

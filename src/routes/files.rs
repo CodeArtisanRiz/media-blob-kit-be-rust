@@ -40,19 +40,8 @@ pub struct FileResponse {
 
 impl From<file::Model> for FileResponse {
     fn from(model: file::Model) -> Self {
-        // Construct public URL
-        // We need the config to get bucket name/endpoint, but simpler is to use S3Service helper if we had one.
-        // For now, let's assume standard S3 path structure for public or we can return the key.
-        // The requirement says "Public URL".
-        
-        let config = crate::config::get_config();
-        let base_url = if let Some(endpoint) = &config.s3_endpoint {
-            format!("{}/{}", endpoint, config.s3_bucket_name)
-        } else {
-             format!("https://{}.s3.{}.amazonaws.com", config.s3_bucket_name, config.aws_region)
-        };
-
-        let url = format!("{}/{}", base_url, model.s3_key);
+        let url = crate::utils::build_s3_url(&model.s3_key);
+        let variants = crate::utils::format_variants_json(&model.variants_json);
 
         Self {
             id: model.id,
@@ -61,7 +50,7 @@ impl From<file::Model> for FileResponse {
             mime_type: model.mime_type,
             size: model.size,
             url,
-            variants: model.variants_json, // This is already Value
+            variants,
             created_at: model.created_at.to_string(),
         }
     }
@@ -257,85 +246,15 @@ pub async fn get_file_content(
 
     // 4. Resolve Key (Original vs Variant)
     let key = if let Some(variant_name) = query.variant {
-        // Check if variant exists in JSON
         let variants = file.variants_json.as_object().ok_or(AppError::InternalServerError("Invalid variants data".into()))?;
         
-        // Variants map should be { "name": "url_or_path" } or similar structure? 
-        // Wait, in Upload Image phase we stored URLs in response, but what did we store in DB?
-        // Let's look at `worker.rs`.
-        // Worker calculates s3_key: `{project}-{id}/images/{variant}/{file_id}.{ext}`
-        // It doesn't seem to explicitly update the `variants_json` in DB with the new key/url?
-        // Let's re-read worker.rs logic.
-        
-        // Ah, in Phase 5 Upload API, we calculated *future* URLs.
-        // But the worker does NOT update the `variants_json` column in `files` table after processing?
-        // Let's assume for now we can dynamically reconstruct the path based on convention if needed, 
-        // OR we need to check if the DB actually has the variant data.
-        
-        // In `src/routes/upload.rs` (implied from docs), we calculated paths. 
-        // But standard implementation usually stores the resulting map in DB.
-        // Let's assume standard behavior: `variants_json` contains map of `variant_name` -> `s3_path` or `public_url`.
-        
         if let Some(variant_path) = variants.get(&variant_name) {
-            // If it's a full URL, we might need to parse it to get the key?
-            // Or if we stored the relative S3 key?
-            // Let's assume we stored the full URL or S3 Key. 
-            // If it's a full URL, we can't easily presign it if it's pointing to a custom domain?
-            // Actually, for presigning, we need the Object Key.
-            
-            // Re-evaluating: In `worker.rs`:
-            // It updates status to "ready", but does NOT update `variants_json`!
-            // This is a missing link in previous phases or implies we must rely on convention.
-            // Convention from `worker.rs`: `{project_name}-{project_id}/images/{variant_name}/{file_id}.{ext}`
-            
-            // So we need to reconstruct the key.
-            // We need project name.
-
-                
-
-            // We need the extension. The original file has `mime_type`.
-            // The variant extension depends on the variant config (e.g. thumb -> webp).
-            // But we don't have the config here easily without querying project settings and re-parsing.
-            
-            // ALTERNATIVE: Use the `variants_json` if it WAS populated.
-            // If it wasn't populated, we have a problem: we don't know the extension of the variant (could be webp, avif, jpg).
-            
-            // Let's check `files` table schema in DB or migration.
-            // If `variants_json` is empty in DB, we can't trivially know which variants exist.
-            
-            // Assuming for now that `variants_json` IS populated by the upload handler with EXPECTED paths?
-            // `POST /upload/image` -> "Calculates future variant paths". 
-            // Did it save them to DB?
-            // If yes, `file.variants_json` has them.
-            // If they are full URLs, we must extract the Key.
-            // Format: `https://bucket.s3.region.amazonaws.com/KEY` or `endpoint/bucket/KEY`.
-            
             let variant_value = variant_path.as_str().ok_or(AppError::NotFound("Invalid variant path".into()))?;
-            
-            // Extract Key from URL.
-            // Simple heuristic used in many systems: split by bucket name?
-            // Or just store keys in DB...
-            
-            // Since I cannot verify the DB content easily without running it, 
-            // I will implement a robust URL-to-Key extractor assuming standard format.
-            
-            let config = crate::config::get_config();
-            let bucket = &config.s3_bucket_name;
-            
-            // Try to find `/bucket_name/` in URL and take everything after.
-            if let Some(idx) = variant_value.find(&format!("/{}/", bucket)) {
-                 variant_value[idx + bucket.len() + 2..].to_string()
-            } else {
-                // S3 Vhost style: `bucket.s3.../KEY`
-                // Take path part.
-                let url = url::Url::parse(variant_value).map_err(|_| AppError::InternalServerError("Failed to parse variant URL".into()))?;
-                url.path().trim_start_matches('/').to_string()
-            }
+            crate::utils::extract_s3_key(variant_value)
         } else {
-             return Err(AppError::NotFound(format!("Variant '{}' not found", variant_name)));
+            return Err(AppError::NotFound(format!("Variant '{}' not found", variant_name)));
         }
     } else {
-        // Original File
         file.s3_key
     };
 

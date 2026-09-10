@@ -66,3 +66,36 @@ pub async fn auth_middleware(
 
     Ok(next.run(req).await)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+
+    #[test]
+    fn test_jwt_claims_encode_decode() {
+        let user_id = Uuid::new_v4();
+        let claims = Claims {
+            sub: "testuser".to_string(),
+            exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
+            role: user::Role::User,
+            user_id,
+        };
+
+        let secret = "testsecret1234567890";
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        ).expect("Failed to encode JWT");
+
+        let decoded = decode::<Claims>(
+            &token,
+            &DecodingKey::from_secret(secret.as_bytes()),
+            &Validation::default(),
+        ).expect("Failed to decode JWT");
+
+        assert_eq!(decoded.claims.sub, "testuser");
+        assert_eq!(decoded.claims.user_id, user_id);
+    }
+}

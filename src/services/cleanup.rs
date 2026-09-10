@@ -66,22 +66,8 @@ impl CleanupService {
                 if let Some(variants) = f.variants_json.as_object() {
                     for (_v_name, v_path) in variants {
                         if let Some(v_str) = v_path.as_str() {
-                            // Extract Key logic (Duplicate from routes/projects.rs - TODO: Shared Helper)
-                            // Ideally we would have `S3Service::delete_from_url_or_key` or similar.
-                             let config = crate::config::get_config();
-                             let bucket = &config.s3_bucket_name;
-                             
-                             let key_to_delete = if let Some(idx) = v_str.find(&format!("/{}/", bucket)) {
-                                  Some(v_str[idx + bucket.len() + 2..].to_string())
-                             } else if let Ok(url) = url::Url::parse(v_str) {
-                                  Some(url.path().trim_start_matches('/').to_string())
-                             } else {
-                                 None
-                             };
-                             
-                             if let Some(k) = key_to_delete {
-                                 let _ = s3_service.delete_object(&k).await;
-                             }
+                            let k = crate::utils::extract_s3_key(v_str);
+                            let _ = s3_service.delete_object(&k).await;
                         }
                     }
                 }

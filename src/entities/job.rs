@@ -9,6 +9,8 @@ pub struct Model {
     pub file_id: Uuid,
     pub status: String,
     pub payload: Json,
+    pub attempt_count: i32,
+    pub max_retries: i32,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }

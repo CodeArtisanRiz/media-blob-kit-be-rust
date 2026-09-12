@@ -112,8 +112,22 @@ async fn main() {
             let broadcaster = services::broadcaster::Broadcaster::new(500);
 
             // build our application using the routes module
+            let cors_layer = if config.allowed_origins.is_empty() {
+                tower_http::cors::CorsLayer::permissive()
+            } else {
+                let origins: Vec<axum::http::HeaderValue> = config
+                    .allowed_origins
+                    .iter()
+                    .filter_map(|o| o.parse().ok())
+                    .collect();
+                tower_http::cors::CorsLayer::new()
+                    .allow_origin(origins)
+                    .allow_methods(tower_http::cors::Any)
+                    .allow_headers(tower_http::cors::Any)
+            };
+
             let app = create_routes(db.clone(), broadcaster.clone())
-                .layer(tower_http::cors::CorsLayer::permissive());
+                .layer(cors_layer);
 
             // Auto-create superuser if configured
             if let (Some(username), Some(password)) = (&config.su_username, &config.su_password) {

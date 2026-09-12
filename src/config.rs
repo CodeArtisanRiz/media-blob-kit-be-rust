@@ -16,6 +16,7 @@ pub struct Config {
     pub auto_migrate: bool,
     pub su_username: Option<String>,
     pub su_password: Option<String>,
+    pub allowed_origins: Vec<String>,
 }
 
 impl Config {
@@ -38,6 +39,13 @@ impl Config {
         let su_username = env::var("SU_USERNAME").ok();
         let su_password = env::var("SU_PASSWORD").ok();
 
+        let allowed_origins = env::var("ALLOWED_ORIGINS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         Self {
             host,
             port,
@@ -58,6 +66,7 @@ impl Config {
                 .unwrap_or(true),
             su_username,
             su_password,
+            allowed_origins,
         }
     }
 }

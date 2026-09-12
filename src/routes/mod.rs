@@ -1,4 +1,5 @@
 mod home;
+mod health;
 mod auth;
 mod users;
 mod projects;
@@ -26,6 +27,8 @@ use crate::services::broadcaster::Broadcaster;
     paths(
         // General endpoints
         home::root,
+        // Health check endpoints
+        health::health_check,
         // Authentication endpoints
         auth::login,
         auth::refresh,
@@ -66,6 +69,8 @@ use crate::services::broadcaster::Broadcaster;
         schemas(
             // Home schemas
             home::RootResponse,
+            // Health schemas
+            health::HealthResponse,
             // Auth schemas
             auth::LoginRequest,
             auth::LoginResponse,
@@ -184,6 +189,7 @@ pub fn create_routes(db: DatabaseConnection, broadcaster: Broadcaster) -> Router
     // Public routes (no auth required) and merge all together
     let app_routes = Router::new()
         .route("/", get(home::root))
+        .route("/health", get(health::health_check))
         .route("/favicon.ico", get(|| async { axum::http::StatusCode::NO_CONTENT }))
         .route("/auth/login", post(auth::login))
         .route("/auth/refresh", post(auth::refresh))

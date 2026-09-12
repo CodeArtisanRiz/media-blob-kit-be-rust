@@ -42,9 +42,11 @@ pub async fn auth_middleware(
     } else if let Some(query_str) = req.uri().query() {
         // Fallback to ?token= query parameter (for browser EventSource connections)
         let token_param = query_str.split('&').find_map(|pair| {
-            let mut parts = pair.split('=');
-            if parts.next() == Some("token") {
-                parts.next().map(|v| v.to_string())
+            let mut parts = pair.splitn(2, '=');
+            let key = parts.next()?;
+            let value = parts.next()?;
+            if key == "token" {
+                Some(value.to_string())
             } else {
                 None
             }

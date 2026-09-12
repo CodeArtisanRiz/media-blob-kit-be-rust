@@ -101,6 +101,7 @@ pub async fn upload_file(
                 size: Set(size),
                 status: Set("ready".to_string()),
                 variants_json: Set(serde_json::json!({})),
+                content_hash: Set(None),
                 created_at: Set(chrono::Utc::now().naive_utc()),
                 updated_at: Set(chrono::Utc::now().naive_utc()),
             };
@@ -252,6 +253,7 @@ pub async fn upload_image(
                 size: Set(size),
                 status: Set(file_status.to_string()),
                 variants_json: Set(variants.clone()),
+                content_hash: Set(None),
                 created_at: Set(chrono::Utc::now().naive_utc()),
                 updated_at: Set(chrono::Utc::now().naive_utc()),
             };
@@ -274,6 +276,8 @@ pub async fn upload_image(
                     payload: Set(serde_json::json!({
                         "variants": filtered_variants_config
                     })),
+                    attempt_count: Set(0),
+                    max_retries: Set(3),
                     created_at: Set(chrono::Utc::now().naive_utc()),
                     updated_at: Set(chrono::Utc::now().naive_utc()),
                 };

@@ -216,6 +216,8 @@ impl Worker {
                 file_id: Set(f.id), // Link to file so we can track it
                 status: Set("pending".to_string()),
                 payload: Set(job_payload),
+                attempt_count: Set(0),
+                max_retries: Set(3),
                 created_at: Set(chrono::Utc::now().naive_utc()),
                 updated_at: Set(chrono::Utc::now().naive_utc()),
                 ..Default::default()

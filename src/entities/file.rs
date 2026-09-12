@@ -15,6 +15,7 @@ pub struct Model {
     pub size: i64,
     pub status: String, // uploaded, processing, ready, error
     pub variants_json: Json,
+    pub content_hash: Option<String>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }

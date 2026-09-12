@@ -410,6 +410,8 @@ pub async fn sync_variants(
             payload: Set(serde_json::json!({
                 "variants": variants_config
             })),
+            attempt_count: Set(0),
+            max_retries: Set(3),
             created_at: Set(chrono::Utc::now().naive_utc()),
             updated_at: Set(chrono::Utc::now().naive_utc()),
         };

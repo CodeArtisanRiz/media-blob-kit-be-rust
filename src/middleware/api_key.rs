@@ -41,13 +41,23 @@ pub async fn api_key_auth(
     let method = request.method().to_string();
     let uri = request.uri().to_string();
 
-    // 1. Check if raw API Key is provided via x-api-key header or ?api_key= query param
+    // 1. Check if raw API Key is provided via x-api-key, X-API-KEY, Authorization: Bearer mbk_..., or ?api_key= query
+    let auth_header = headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok());
+
     let raw_api_key = if let Some(header_val) = headers.get("x-api-key").and_then(|h| h.to_str().ok()) {
         Some(header_val.to_string())
+    } else if let Some(auth) = auth_header {
+        if auth.starts_with("Bearer mbk_") {
+            Some(auth[7..].to_string())
+        } else if auth.starts_with("mbk_") {
+            Some(auth.to_string())
+        } else {
+            None
+        }
     } else if let Some(query_str) = request.uri().query() {
         query_str.split('&').find_map(|pair| {
             let mut parts = pair.split('=');
-            if parts.next() == Some("api_key") {
+            if parts.next() == Some("api_key") || parts.next() == Some("key") {
                 parts.next().map(|v| v.to_string())
             } else {
                 None
@@ -108,9 +118,9 @@ pub async fn api_key_auth(
     }
 
     // 2. Check if request is authenticated via Bearer JWT (Dashboard Admin / User Upload)
-    let jwt_token = if let Some(auth_header) = headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok()) {
-        if auth_header.starts_with("Bearer ") {
-            Some(auth_header[7..].to_string())
+    let jwt_token = if let Some(auth) = auth_header {
+        if auth.starts_with("Bearer ") && !auth.starts_with("Bearer mbk_") {
+            Some(auth[7..].to_string())
         } else {
             None
         }

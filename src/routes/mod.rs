@@ -177,6 +177,8 @@ pub fn create_routes(db: DatabaseConnection, broadcaster: Broadcaster) -> Router
         .layer(middleware::from_fn(require_su))
         .layer(middleware::from_fn(auth_middleware));
 
+    let rate_limiter = crate::middleware::rate_limit::RateLimiter::new(120, 60);
+
     // Public routes (no auth required) and merge all together
     let app_routes = Router::new()
         .route("/", get(home::root))
@@ -194,6 +196,7 @@ pub fn create_routes(db: DatabaseConnection, broadcaster: Broadcaster) -> Router
                 .route("/jobs", get(jobs::list_jobs))
                 .layer(axum::middleware::from_fn_with_state(db.clone(), crate::middleware::api_key::api_key_auth))
         )
+        .layer(axum::middleware::from_fn_with_state(rate_limiter, crate::middleware::rate_limit::rate_limit_middleware))
         .layer(axum::Extension(broadcaster))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(db);

@@ -11,6 +11,10 @@ pub struct Model {
     pub name: String,
     pub description: Option<String>,
     pub settings: Json,
+    pub storage_used_bytes: i64,
+    pub storage_limit_bytes: i64,
+    pub transforms_used: i64,
+    pub transforms_limit: i64,
     pub created_at: DateTime,
     pub updated_at: DateTime,
     pub deleted_at: Option<DateTime>,
@@ -27,6 +31,8 @@ pub enum Relation {
     User,
     #[sea_orm(has_many = "super::api_key::Entity")]
     ApiKey,
+    #[sea_orm(has_many = "super::file::Entity")]
+    File,
 }
 
 impl Related<super::user::Entity> for Entity {
@@ -38,6 +44,12 @@ impl Related<super::user::Entity> for Entity {
 impl Related<super::api_key::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::ApiKey.def()
+    }
+}
+
+impl Related<super::file::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::File.def()
     }
 }
 

@@ -5,7 +5,7 @@ use axum::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, Set, PaginatorTrait,
+    QueryOrder, Set, PaginatorTrait, ModelTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,13 +43,17 @@ pub struct UpdateProjectRequest {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ProjectResponse {
     #[schema(value_type = String)]
-    id: Uuid,
-    name: String,
-    description: Option<String>,
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
     #[schema(value_type = Object)]
-    settings: Value,
-    created_at: chrono::NaiveDateTime,
-    updated_at: chrono::NaiveDateTime,
+    pub settings: Value,
+    pub storage_used_bytes: i64,
+    pub storage_limit_bytes: i64,
+    pub transforms_used: i64,
+    pub transforms_limit: i64,
+    pub created_at: chrono::NaiveDateTime,
+    pub updated_at: chrono::NaiveDateTime,
 }
 
 impl From<project::Model> for ProjectResponse {
@@ -59,6 +63,10 @@ impl From<project::Model> for ProjectResponse {
             name: project.name,
             description: project.description,
             settings: project.settings,
+            storage_used_bytes: project.storage_used_bytes,
+            storage_limit_bytes: project.storage_limit_bytes,
+            transforms_used: project.transforms_used,
+            transforms_limit: project.transforms_limit,
             created_at: project.created_at,
             updated_at: project.updated_at,
         }
@@ -83,14 +91,16 @@ pub async fn create_project(
     auth_user: axum::Extension<AuthUser>,
     Json(payload): Json<CreateProjectRequest>,
 ) -> Result<(StatusCode, Json<ProjectResponse>), AppError> {
-
-
     let project = project::ActiveModel {
         id: Set(Uuid::new_v4()),
         owner_id: Set(auth_user.id),
         name: Set(payload.name),
         description: Set(payload.description),
         settings: Set(payload.settings.unwrap_or(serde_json::json!({}))),
+        storage_used_bytes: Set(0),
+        storage_limit_bytes: Set(5 * 1024 * 1024 * 1024), // 5 GB default quota
+        transforms_used: Set(0),
+        transforms_limit: Set(10_000), // 10,000 monthly transforms quota
         created_at: Set(chrono::Utc::now().naive_utc()),
         updated_at: Set(chrono::Utc::now().naive_utc()),
         ..Default::default()
@@ -102,7 +112,6 @@ pub async fn create_project(
     Ok((StatusCode::CREATED, Json(ProjectResponse::from(created_project))))
 }
 
-// GET /projects
 #[utoipa::path(
     get,
     path = "/projects",
@@ -124,7 +133,6 @@ pub async fn list_projects(
     auth_user: axum::Extension<AuthUser>,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<PaginatedResponse<ProjectResponse>>, AppError> {
-
     let page = pagination.page.unwrap_or(1);
     let limit = pagination.limit.unwrap_or(10);
 
@@ -224,10 +232,9 @@ pub async fn update_project(
             if let Some(settings) = payload.settings {
                 active_project.settings = Set(settings);
             }
-            
             active_project.updated_at = Set(chrono::Utc::now().naive_utc());
-            let updated_project = active_project.update(&db).await?;
 
+            let updated_project = active_project.update(&db).await?;
             println!("Project | PUT /projects/{} | user={} | res=200", project_id, auth_user.username);
             Ok(Json(ProjectResponse::from(updated_project)))
         }
@@ -238,13 +245,12 @@ pub async fn update_project(
     }
 }
 
-// DELETE /projects/:id
 #[utoipa::path(
     delete,
     path = "/projects/{id}",
     params(
         ("id" = Uuid, Path, description = "Project ID"),
-        ("permanent" = Option<bool>, Query, description = "Permanently delete project and files")
+        ("permanent" = Option<bool>, Query, description = "Permanent hard deletion flag")
     ),
     responses(
         (status = 200, description = "Project deleted successfully"),
@@ -262,172 +268,51 @@ pub async fn delete_project(
     Path(project_id): Path<Uuid>,
     Query(query): Query<DeleteProjectQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    
-    // Check if hard delete requested
-    let hard_delete = query.permanent.unwrap_or(false);
-
     let project = Project::find_by_id(project_id)
         .filter(project::Column::OwnerId.eq(auth_user.id))
-        .filter(project::Column::DeletedAt.is_null()) // Always check soft delete first
         .one(&db)
         .await?;
 
     match project {
         Some(p) => {
-            if hard_delete {
-                // HARD DELETE LOGIC
-                
-                // 1. Find all files for this project
-                let files = file::Entity::find()
-                    .filter(file::Column::ProjectId.eq(p.id))
-                    .all(&db)
-                    .await
-                    .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+            let permanent = query.permanent.unwrap_or(false);
 
+            if permanent {
                 let s3_service = S3Service::new().await;
+                let files = file::Entity::find()
+                    .filter(file::Column::ProjectId.eq(project_id))
+                    .all(&db)
+                    .await?;
 
-                // 2. Iterate and delete from S3
                 for f in files {
-                    // Delete Original
                     let _ = s3_service.delete_object(&f.s3_key).await;
-
-                    // Delete Variants
                     if let Some(variants) = f.variants_json.as_object() {
                         for (_v_name, v_path) in variants {
                             if let Some(v_str) = v_path.as_str() {
-                                // Extract key logic (simplified for now, ideally shared helper)
-                                let config = crate::config::get_config();
-                                let bucket = &config.s3_bucket_name;
-                                
-                                let key_to_delete = if let Some(idx) = v_str.find(&format!("/{}/", bucket)) {
-                                     Some(v_str[idx + bucket.len() + 2..].to_string())
-                                } else if let Ok(url) = url::Url::parse(v_str) {
-                                     Some(url.path().trim_start_matches('/').to_string())
-                                } else {
-                                    None
-                                };
-                                
-                                if let Some(k) = key_to_delete {
-                                    let _ = s3_service.delete_object(&k).await;
-                                }
+                                let k = crate::utils::extract_s3_key(v_str);
+                                let _ = s3_service.delete_object(&k).await;
                             }
                         }
                     }
-                    
-                    // Delete File Row (Optional if cascade is set on DB, but SeaORM needs explicit handling if not relying on DB cascade entirely for logic)
-                    // DB `on_delete=Cascade` handles this automatically if configured in Postgres.
-                    // But we will be safe and delete manually or rely on cascade. 
-                    // Since schema has `on_delete="Cascade"`, deleting project *should* delete files.
-                    // But good to clean up S3 first.
                 }
 
-                // 3. Delete Project from DB
-                let res = Project::delete_by_id(p.id).exec(&db).await.map_err(|e| AppError::InternalServerError(e.to_string()))?;
-                 
-                 if res.rows_affected == 0 {
-                    return Err(AppError::InternalServerError("Failed to delete project".into()));
-                 }
-
-                println!("Project | DELETE /projects/{}?permanent=true | user={} | res=200", project_id, auth_user.username);
-                 Ok(Json(serde_json::json!({
-                    "message": "Project permanently deleted"
+                p.delete(&db).await?;
+                println!("Project | DELETE /projects/{} | user={} | mode=hard | res=200", project_id, auth_user.username);
+                Ok(Json(serde_json::json!({
+                    "message": "Project and all associated assets permanently deleted"
                 })))
-
             } else {
-                // SOFT DELETE LOGIC (Existing)
                 let mut active_project = p.into_active_model();
                 active_project.deleted_at = Set(Some(chrono::Utc::now().naive_utc()));
                 active_project.update(&db).await?;
-    
-                println!("Project | DELETE /projects/{} | user={} | res=200", project_id, auth_user.username);
+                println!("Project | DELETE /projects/{} | user={} | mode=soft | res=200", project_id, auth_user.username);
                 Ok(Json(serde_json::json!({
-                    "message": "Project deleted successfully"
+                    "message": "Project soft-deleted successfully (30-day retention)"
                 })))
             }
         }
         None => {
             println!("Project | DELETE /projects/{} | user={} | res=404 | Project not found", project_id, auth_user.username);
-            Err(AppError::NotFound("Project not found".to_string()))
-        }
-    }
-}
-
-
-#[utoipa::path(
-    post,
-    path = "/projects/{id}/sync-variants",
-    params(
-        ("id" = Uuid, Path, description = "Project ID")
-    ),
-    responses(
-        (status = 202, description = "Variant synchronization started"),
-        (status = 404, description = "Project not found"),
-        (status = 500, description = "Internal server error")
-    ),
-    security(
-        ("bearer_auth" = [])
-    ),
-    tag = "Project Management"
-)]
-pub async fn sync_variants(
-    State(db): State<DatabaseConnection>,
-    auth_user: axum::Extension<AuthUser>,
-    Path(project_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let project = Project::find_by_id(project_id)
-        .filter(project::Column::OwnerId.eq(auth_user.id))
-        .filter(project::Column::DeletedAt.is_null())
-        .one(&db)
-        .await?;
-
-    match project {
-        Some(p) => {
-             // Create Sync Job Payload (Optional, if we want to log it or use it for the wrapper job logic in future)
-             // But we are spawning individual file jobs directly here.
-             
-             // 1. Find all image files
-            let files = file::Entity::find()
-                .filter(file::Column::ProjectId.eq(p.id))
-                .filter(file::Column::MimeType.like("image/%")) // SeaORM like? or contains?
-                // SeaORM uses LIKE for strings. 
-                // MimeType is String.
-                // .filter(file::Column::MimeType.contains("image")) Is safer if SeaORM supports it.
-                // Let's use `starts_with` or `contains`.
-                .filter(file::Column::MimeType.contains("image"))
-                .all(&db)
-                .await
-                .map_err(|e| AppError::InternalServerError(e.to_string()))?;
-
-            let variants_json = p.settings.get("variants").cloned().unwrap_or(serde_json::json!({}));
-            
-            let mut job_count = 0;
-            for f in files {
-                let job_payload = serde_json::json!({
-                    "type": "sync_file_variants",
-                    "variants_config": variants_json 
-                });
-
-                let job = job::ActiveModel {
-                    id: Set(Uuid::new_v4()),
-                    file_id: Set(f.id),
-                    status: Set("pending".to_string()),
-                    payload: Set(job_payload),
-                    created_at: Set(chrono::Utc::now().naive_utc()),
-                    updated_at: Set(chrono::Utc::now().naive_utc()),
-                    ..Default::default()
-                };
-
-                job.insert(&db).await.map_err(|e| AppError::InternalServerError(e.to_string()))?;
-                job_count += 1;
-            }
-
-            println!("Project | POST /projects/{}/sync-variants | user={} | jobs_spawned={} | res=202", project_id, auth_user.username, job_count);
-            Ok(Json(serde_json::json!({
-                "message": "Variant synchronization started",
-                "jobs_queued": job_count
-            })))
-        }
-        None => {
             Err(AppError::NotFound("Project not found".to_string()))
         }
     }
@@ -441,7 +326,7 @@ pub async fn sync_variants(
     ),
     responses(
         (status = 200, description = "Project restored successfully", body = ProjectResponse),
-        (status = 404, description = "Project not found or not soft-deleted"),
+        (status = 404, description = "Project not found or not in soft-deleted state"),
         (status = 500, description = "Internal server error")
     ),
     security(
@@ -465,13 +350,76 @@ pub async fn restore_project(
             let mut active_project = p.into_active_model();
             active_project.deleted_at = Set(None);
             active_project.updated_at = Set(chrono::Utc::now().naive_utc());
-            let updated = active_project.update(&db).await?;
-
+            let restored = active_project.update(&db).await?;
             println!("Project | POST /projects/{}/restore | user={} | res=200", project_id, auth_user.username);
-            Ok(Json(ProjectResponse::from(updated)))
+            Ok(Json(ProjectResponse::from(restored)))
         }
         None => {
-            Err(AppError::NotFound("Project not found or not in trash".to_string()))
+            println!("Project | POST /projects/{}/restore | user={} | res=404 | Project not found", project_id, auth_user.username);
+            Err(AppError::NotFound("Project not found or not soft-deleted".to_string()))
         }
     }
+}
+
+#[utoipa::path(
+    post,
+    path = "/projects/{id}/sync-variants",
+    params(
+        ("id" = Uuid, Path, description = "Project ID")
+    ),
+    responses(
+        (status = 200, description = "Variant synchronization jobs queued successfully"),
+        (status = 404, description = "Project not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    ),
+    tag = "Project Management"
+)]
+pub async fn sync_variants(
+    State(db): State<DatabaseConnection>,
+    auth_user: axum::Extension<AuthUser>,
+    Path(project_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project = Project::find_by_id(project_id)
+        .filter(project::Column::OwnerId.eq(auth_user.id))
+        .filter(project::Column::DeletedAt.is_null())
+        .one(&db)
+        .await?;
+
+    let project = match project {
+        Some(p) => p,
+        None => return Err(AppError::NotFound("Project not found".to_string())),
+    };
+
+    let files = file::Entity::find()
+        .filter(file::Column::ProjectId.eq(project_id))
+        .filter(file::Column::MimeType.starts_with("image/"))
+        .all(&db)
+        .await?;
+
+    let variants_config = project.settings.get("variants").cloned().unwrap_or(serde_json::json!({}));
+
+    let mut count = 0;
+    for f in files {
+        let job = job::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            file_id: Set(f.id),
+            status: Set("pending".to_string()),
+            payload: Set(serde_json::json!({
+                "variants": variants_config
+            })),
+            created_at: Set(chrono::Utc::now().naive_utc()),
+            updated_at: Set(chrono::Utc::now().naive_utc()),
+        };
+        job.insert(&db).await?;
+        count += 1;
+    }
+
+    println!("Project | POST /projects/{}/sync-variants | user={} | jobs_queued={} | res=200", project_id, auth_user.username, count);
+    Ok(Json(serde_json::json!({
+        "message": format!("Triggered regeneration for {} image(s)", count),
+        "jobs_queued": count
+    })))
 }

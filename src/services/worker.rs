@@ -335,11 +335,21 @@ impl Worker {
         }
 
         // Update File status AND variants_json
+        let transform_count = successful_variants.len() as i64;
         let mut file_active: file::ActiveModel = file.clone().into();
         file_active.status = Set("ready".to_string());
         file_active.variants_json = Set(serde_json::Value::Object(successful_variants));
         file_active.updated_at = Set(chrono::Utc::now().naive_utc());
         file_active.update(&self.db).await.map_err(|e| e.to_string())?;
+
+        // Update Project transforms_used counter
+        if transform_count > 0 {
+            let update_stmt = sea_orm::Statement::from_string(
+                self.db.get_database_backend(),
+                format!("UPDATE projects SET transforms_used = transforms_used + {} WHERE id = '{}'", transform_count, project.id),
+            );
+            let _ = self.db.execute(update_stmt).await;
+        }
 
         Ok(())
     }

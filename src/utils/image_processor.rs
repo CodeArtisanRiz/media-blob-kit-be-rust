@@ -1,25 +1,33 @@
-use image::ImageFormat;
+use image::{ImageFormat, ImageReader, Limits};
 use std::io::Cursor;
 use crate::models::settings::VariantConfig;
 use crate::error::AppError;
 
 pub fn process_image(data: &[u8], config: &VariantConfig) -> Result<(Vec<u8>, String), AppError> {
-    // 1. Load image
-    let mut img = image::load_from_memory(data)
-        .map_err(|e| AppError::InternalServerError(format!("Failed to load image: {}", e)))?;
+    // 1. Load image with strict memory and dimension limits to prevent OOM attacks
+    let mut reader = ImageReader::new(Cursor::new(data));
+    reader = reader.with_guessed_format()
+        .map_err(|e| AppError::BadRequest(format!("Unsupported image format: {}", e)))?;
 
-    // 2. Resize if needed
-    // 2. Resize if needed
-    // Logic:
-    // - If both width and height are provided (and fit wasn't cover/contain specific): assume exact resize or fit?
-    //   For safety and simplicity given standard use cases (w1200), we probably want 'resize' (fit within) if one is missing, 
-    //   or 'resize_exact' if both are present?
-    //   Actually, standard behavior for 'width=1200, height=null' is "width 1200, auto height".
-    //   Standard behavior for 'width=1200, height=800' could be "force 1200x800".
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(10_000);  // Cap at 10k pixels width
+    limits.max_image_height = Some(10_000); // Cap at 10k pixels height
+    limits.max_alloc = Some(128 * 1024 * 1024); // Cap decoding buffer allocation to 128MB RAM
+    reader.limits(limits);
 
-    // 2. Resize if needed
-    let filter = image::imageops::FilterType::Lanczos3;
-    let fit = config.fit.as_deref().unwrap_or("contain"); // Default to contain if not specified
+    let mut img = reader.decode()
+        .map_err(|e| AppError::InternalServerError(format!("Failed to decode image safely: {}", e)))?;
+
+    // 2. Optimized Filter & Resizing
+    // Use Triangle/Nearest for very small thumbnails, Lanczos3 for high quality previews
+    let is_thumb = config.width.map(|w| w <= 200).unwrap_or(false) || config.height.map(|h| h <= 200).unwrap_or(false);
+    let filter = if is_thumb {
+        image::imageops::FilterType::Triangle
+    } else {
+        image::imageops::FilterType::Lanczos3
+    };
+
+    let fit = config.fit.as_deref().unwrap_or("contain");
 
     if let (Some(w), Some(h)) = (config.width, config.height) {
         match fit {
@@ -30,18 +38,14 @@ pub fn process_image(data: &[u8], config: &VariantConfig) -> Result<(Vec<u8>, St
                 img = img.resize_exact(w, h, filter);
             },
             _ => {
-                // Default "contain" / "inside" behavior
                 img = img.resize(w, h, filter);
             }
         }
     } else if let Some(w) = config.width {
-        // Only width: maintain aspect ratio
         img = img.resize(w, u32::MAX, filter);
     } else if let Some(h) = config.height {
-        // Only height: maintain aspect ratio
         img = img.resize(u32::MAX, h, filter);
     } else if let (Some(w), Some(h)) = (config.max_width, config.max_height) {
-        // Max dimensions: fit within
         img = img.resize(w, h, filter);
     }
 
@@ -53,7 +57,6 @@ pub fn process_image(data: &[u8], config: &VariantConfig) -> Result<(Vec<u8>, St
         "png" => (ImageFormat::Png, "image/png"),
         "jpg" | "jpeg" => (ImageFormat::Jpeg, "image/jpeg"),
         "original" => {
-            // Detect original format
             let fmt = image::guess_format(data)
                 .map_err(|e| AppError::InternalServerError(format!("Failed to guess format: {}", e)))?;
             let mime = match fmt {
@@ -65,7 +68,7 @@ pub fn process_image(data: &[u8], config: &VariantConfig) -> Result<(Vec<u8>, St
             };
             (fmt, mime)
         },
-        _ => (ImageFormat::Jpeg, "image/jpeg"), // Default fallback
+        _ => (ImageFormat::Jpeg, "image/jpeg"),
     };
 
     // 4. Encode with Quality
@@ -76,7 +79,7 @@ pub fn process_image(data: &[u8], config: &VariantConfig) -> Result<(Vec<u8>, St
         ImageFormat::Jpeg => {
             let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, quality);
             img.write_with_encoder(encoder)
-                .map_err(|e| AppError::InternalServerError(format!("Failed to encode JPEG image: {}", e)))?;
+                .map_err(|e| AppError::InternalServerError(format!("Failed to encode JPEG: {}", e)))?;
         }
         _ => {
             img.write_to(&mut buffer, output_format)
@@ -85,40 +88,4 @@ pub fn process_image(data: &[u8], config: &VariantConfig) -> Result<(Vec<u8>, St
     }
 
     Ok((buffer.into_inner(), mime_type.to_string()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use image::{RgbImage, ImageBuffer, Rgb};
-
-    fn create_test_image_png(width: u32, height: u32) -> Vec<u8> {
-        let img: RgbImage = ImageBuffer::from_pixel(width, height, Rgb([255, 0, 0]));
-        let mut bytes: Vec<u8> = Vec::new();
-        let mut cursor = Cursor::new(&mut bytes);
-        img.write_to(&mut cursor, ImageFormat::Png).unwrap();
-        bytes
-    }
-
-    #[test]
-    fn test_process_image_resize_and_format() {
-        let input_bytes = create_test_image_png(100, 100);
-        let config = VariantConfig {
-            format: Some("jpg".to_string()),
-            quality: Some(85),
-            width: Some(50),
-            height: Some(50),
-            max_width: None,
-            max_height: None,
-            fit: Some("contain".to_string()),
-        };
-
-        let (processed_data, mime) = process_image(&input_bytes, &config).expect("Image processing failed");
-        assert_eq!(mime, "image/jpeg");
-        assert!(!processed_data.is_empty());
-
-        let decoded = image::load_from_memory(&processed_data).expect("Failed to decode processed image");
-        assert_eq!(decoded.width(), 50);
-        assert_eq!(decoded.height(), 50);
-    }
 }

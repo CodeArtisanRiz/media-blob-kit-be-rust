@@ -6,6 +6,7 @@ mod m20241202_000003_create_projects_table;
 mod m20241202_000004_create_api_keys_table;
 mod m20241204_000005_create_files_table;
 mod m20241204_000006_create_jobs_table;
+mod m20260912_000007_add_quota_to_projects;
 
 pub struct Migrator;
 
@@ -19,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20241202_000004_create_api_keys_table::Migration),
             Box::new(m20241204_000005_create_files_table::Migration),
             Box::new(m20241204_000006_create_jobs_table::Migration),
+            Box::new(m20260912_000007_add_quota_to_projects::Migration),
         ]
     }
 }

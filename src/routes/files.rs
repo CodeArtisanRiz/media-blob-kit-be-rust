@@ -5,7 +5,7 @@ use axum::{
 };
 use sea_orm::{
     ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, PaginatorTrait,
-    Condition,
+    ConnectionTrait, Condition,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -357,6 +357,13 @@ pub async fn delete_file(
     if res.rows_affected == 0 {
          return Err(AppError::NotFound("File not found in DB".into()));
     }
+
+    // 5. Decrement project storage quota tracking
+    let update_stmt = sea_orm::Statement::from_string(
+        db.get_database_backend(),
+        format!("UPDATE projects SET storage_used_bytes = GREATEST(0, storage_used_bytes - {}) WHERE id = '{}'", file.size, file.project_id),
+    );
+    let _ = db.execute(update_stmt).await;
 
     Ok(Json(serde_json::json!({
         "message": "File deleted successfully",

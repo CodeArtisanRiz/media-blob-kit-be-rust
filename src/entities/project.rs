@@ -15,6 +15,7 @@ pub struct Model {
     pub storage_limit_bytes: i64,
     pub transforms_used: i64,
     pub transforms_limit: i64,
+    pub transforms_total: i64,
     pub created_at: DateTime,
     pub updated_at: DateTime,
     pub deleted_at: Option<DateTime>,

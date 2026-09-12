@@ -65,7 +65,7 @@ async fn check_storage_quota(
         .map_err(AppError::DatabaseError)?
         .ok_or_else(|| AppError::NotFound("Project not found".to_string()))?;
 
-    if proj.storage_used_bytes + upload_size > proj.storage_limit_bytes {
+    if proj.storage_limit_bytes != -1 && proj.storage_used_bytes + upload_size > proj.storage_limit_bytes {
         return Err(AppError::BadRequest(format!(
             "Storage quota exceeded: used {} + upload {} > limit {}",
             proj.storage_used_bytes, upload_size, proj.storage_limit_bytes
@@ -87,7 +87,7 @@ async fn check_transforms_quota(
         .map_err(AppError::DatabaseError)?
         .ok_or_else(|| AppError::NotFound("Project not found".to_string()))?;
 
-    if proj.transforms_used + transform_count > proj.transforms_limit {
+    if proj.transforms_limit != -1 && proj.transforms_used + transform_count > proj.transforms_limit {
         return Err(AppError::BadRequest(format!(
             "Transform quota exceeded: used {} + requested {} > limit {}",
             proj.transforms_used, transform_count, proj.transforms_limit

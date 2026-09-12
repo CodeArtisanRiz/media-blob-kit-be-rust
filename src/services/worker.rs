@@ -343,6 +343,10 @@ impl Worker {
                     Expr::col(project::Column::TransformsUsed).add(transform_count),
                 )
                 .col_expr(
+                    project::Column::TransformsTotal,
+                    Expr::col(project::Column::TransformsTotal).add(transform_count),
+                )
+                .col_expr(
                     project::Column::StorageUsedBytes,
                     Expr::col(project::Column::StorageUsedBytes).add(total_variant_bytes),
                 )

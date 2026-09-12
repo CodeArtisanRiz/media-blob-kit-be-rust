@@ -38,6 +38,8 @@ pub struct UpdateProjectRequest {
     description: Option<String>,
     #[schema(value_type = Object)]
     settings: Option<Value>,
+    storage_limit_bytes: Option<i64>,
+    transforms_limit: Option<i64>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -52,6 +54,7 @@ pub struct ProjectResponse {
     pub storage_limit_bytes: i64,
     pub transforms_used: i64,
     pub transforms_limit: i64,
+    pub transforms_total: i64,
     pub created_at: chrono::NaiveDateTime,
     pub updated_at: chrono::NaiveDateTime,
 }
@@ -67,6 +70,7 @@ impl From<project::Model> for ProjectResponse {
             storage_limit_bytes: project.storage_limit_bytes,
             transforms_used: project.transforms_used,
             transforms_limit: project.transforms_limit,
+            transforms_total: project.transforms_total,
             created_at: project.created_at,
             updated_at: project.updated_at,
         }
@@ -107,6 +111,7 @@ pub async fn create_project(
         storage_limit_bytes: Set(5 * 1024 * 1024 * 1024), // 5 GB default quota
         transforms_used: Set(0),
         transforms_limit: Set(10_000), // 10,000 monthly transforms quota
+        transforms_total: Set(0),
         created_at: Set(chrono::Utc::now().naive_utc()),
         updated_at: Set(chrono::Utc::now().naive_utc()),
         ..Default::default()
@@ -240,6 +245,12 @@ pub async fn update_project(
                     .map_err(|e| AppError::BadRequest(format!("Invalid settings JSON: {}", e)))?;
                 settings_parsed.validate().map_err(AppError::BadRequest)?;
                 active_project.settings = Set(settings);
+            }
+            if let Some(storage_limit) = payload.storage_limit_bytes {
+                active_project.storage_limit_bytes = Set(storage_limit);
+            }
+            if let Some(transforms_limit) = payload.transforms_limit {
+                active_project.transforms_limit = Set(transforms_limit);
             }
             active_project.updated_at = Set(chrono::Utc::now().naive_utc());
 

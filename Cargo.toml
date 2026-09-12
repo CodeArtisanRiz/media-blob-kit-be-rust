@@ -42,3 +42,7 @@ members = [".", "migration"]
 [[bin]]
 name = "reset_db"
 path = "utils/reset_db.rs"
+
+[[bin]]
+name = "recalc_storage"
+path = "utils/recalc_storage.rs"

@@ -1,36 +1,57 @@
-# Builder stage
-FROM rust:alpine AS builder
-
-# Install build dependencies
-RUN apk add --no-cache musl-dev openssl-dev curl
-
+# -------------------------------------------------------------
+# 1. Chef Planner: Extracts dependency recipe from Cargo files
+# -------------------------------------------------------------
+FROM lukemathwalker/cargo-chef:latest-rust-1-bookworm AS chef
 WORKDIR /app
 
-# Copy source code
+FROM chef AS planner
 COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Build release binary
-RUN cargo build --release
+# -------------------------------------------------------------
+# 2. Builder: Pre-compiles and CACHES all crates with lld linker
+# -------------------------------------------------------------
+FROM chef AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    clang \
+    lld \
+    && rm -rf /var/lib/apt/lists/*
 
-# Runtime stage
-FROM alpine:3.20
+COPY --from=planner /app/recipe.json recipe.json
 
-# Install runtime dependencies
-RUN apk add --no-cache libgcc openssl ca-certificates dumb-init
+# Build & cache dependencies (this layer is reused across code changes)
+ENV RUSTFLAGS="-C link-arg=-fuse-ld=lld"
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Build actual application binary
+COPY . .
+RUN cargo build --release --bin media-blob-kit
+
+# -------------------------------------------------------------
+# 3. Minimal Production Runtime (~95MB Debian Slim)
+# -------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    dumb-init \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy binary from builder
+# Copy compiled binary from builder
 COPY --from=builder /app/target/release/media-blob-kit .
 
-# Environment setup
+# Environment defaults
 ENV RUST_LOG=info
 ENV APP_HOST=0.0.0.0
 ENV APP_PORT=3000
 
-# Expose port
 EXPOSE 3000
 
-# Use dumb-init as entrypoint to handle signals correctly
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 CMD ["./media-blob-kit"]

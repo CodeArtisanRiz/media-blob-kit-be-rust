@@ -5,7 +5,7 @@ use axum::{
 };
 use sea_orm::{
     ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, PaginatorTrait,
-    ConnectionTrait, Condition,
+    Condition,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -78,8 +78,8 @@ pub async fn list_files(
     State(db): State<sea_orm::DatabaseConnection>,
     Query(query): Query<ListFilesQuery>,
 ) -> Result<Json<PaginatedResponse<FileResponse>>, AppError> {
-    let page = query.page.unwrap_or(1);
-    let limit = query.limit.unwrap_or(10);
+    let page = query.page.unwrap_or(1).max(1);
+    let limit = query.limit.unwrap_or(10).max(1);
 
     // 2. Build Filter
     let mut condition = Condition::all();
@@ -359,14 +359,137 @@ pub async fn delete_file(
     }
 
     // 5. Decrement project storage quota tracking
-    let update_stmt = sea_orm::Statement::from_string(
-        db.get_database_backend(),
-        format!("UPDATE projects SET storage_used_bytes = GREATEST(0, storage_used_bytes - {}) WHERE id = '{}'", file.size, file.project_id),
-    );
-    let _ = db.execute(update_stmt).await;
+    use sea_orm::sea_query::Expr;
+    let _ = project::Entity::update_many()
+        .col_expr(
+            project::Column::StorageUsedBytes,
+            Expr::cust(format!("GREATEST(0, storage_used_bytes - {})", file.size)),
+        )
+        .filter(project::Column::Id.eq(file.project_id))
+        .exec(&db)
+        .await;
 
     Ok(Json(serde_json::json!({
         "message": "File deleted successfully",
         "id": id
     })))
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct BatchDeleteRequest {
+    pub ids: Vec<Uuid>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct BatchDeleteResponse {
+    pub deleted_count: usize,
+    pub failed_count: usize,
+    pub freed_bytes: i64,
+}
+
+// POST /files/batch-delete
+#[utoipa::path(
+    post,
+    path = "/files/batch-delete",
+    request_body = BatchDeleteRequest,
+    responses(
+        (status = 200, description = "Batch files deleted", body = BatchDeleteResponse),
+        (status = 400, description = "Too many files requested or empty"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    ),
+    tag = "File Management"
+)]
+pub async fn batch_delete_files(
+    Extension(user): Extension<AuthUser>,
+    State(db): State<sea_orm::DatabaseConnection>,
+    Json(payload): Json<BatchDeleteRequest>,
+) -> Result<Json<BatchDeleteResponse>, AppError> {
+    if payload.ids.is_empty() {
+        return Err(AppError::BadRequest("No file IDs provided".into()));
+    }
+    if payload.ids.len() > 100 {
+        return Err(AppError::BadRequest("Cannot delete more than 100 files in one request".into()));
+    }
+
+    let files = file::Entity::find()
+        .filter(file::Column::Id.is_in(payload.ids.clone()))
+        .all(&db)
+        .await
+        .map_err(AppError::DatabaseError)?;
+
+    let s3_service = S3Service::new().await;
+    let config = crate::config::get_config();
+    let bucket = &config.s3_bucket_name;
+
+    let mut deleted_count = 0;
+    let mut failed_count = 0;
+    let mut freed_bytes: i64 = 0;
+
+    for f in files {
+        // Ownership check
+        if user.role != crate::entities::user::Role::Su {
+            let project = project::Entity::find_by_id(f.project_id)
+                .one(&db)
+                .await
+                .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+            if let Some(p) = project {
+                if p.owner_id != user.id {
+                    failed_count += 1;
+                    continue;
+                }
+            } else {
+                failed_count += 1;
+                continue;
+            }
+        }
+
+        // Delete S3 original
+        let _ = s3_service.delete_object(&f.s3_key).await;
+
+        // Delete variants
+        if let Some(variants) = f.variants_json.as_object() {
+            for (_v_name, v_path) in variants {
+                if let Some(variant_str) = v_path.as_str() {
+                    let key_to_delete = if let Some(idx) = variant_str.find(&format!("/{}/", bucket)) {
+                        Some(variant_str[idx + bucket.len() + 2..].to_string())
+                    } else if let Ok(url) = url::Url::parse(variant_str) {
+                        Some(url.path().trim_start_matches('/').to_string())
+                    } else {
+                        None
+                    };
+
+                    if let Some(key) = key_to_delete {
+                        let _ = s3_service.delete_object(&key).await;
+                    }
+                }
+            }
+        }
+
+        // Delete DB record
+        if let Ok(_) = file::Entity::delete_by_id(f.id).exec(&db).await {
+            deleted_count += 1;
+            freed_bytes += f.size;
+            
+            use sea_orm::sea_query::Expr;
+            let _ = project::Entity::update_many()
+                .col_expr(
+                    project::Column::StorageUsedBytes,
+                    Expr::cust(format!("GREATEST(0, storage_used_bytes - {})", f.size)),
+                )
+                .filter(project::Column::Id.eq(f.project_id))
+                .exec(&db)
+                .await;
+        } else {
+            failed_count += 1;
+        }
+    }
+
+    Ok(Json(BatchDeleteResponse {
+        deleted_count,
+        failed_count,
+        freed_bytes,
+    }))
 }

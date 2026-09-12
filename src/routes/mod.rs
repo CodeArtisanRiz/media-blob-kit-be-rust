@@ -37,6 +37,7 @@ use crate::services::broadcaster::Broadcaster;
         // User management endpoints
         users::create_user,
         users::list_users,
+        users::update_user,
         users::delete_user,
         // Project management endpoints
         projects::create_project,
@@ -58,12 +59,14 @@ use crate::services::broadcaster::Broadcaster;
         // Jobs endpoints
         jobs::list_jobs,
         jobs::list_admin_jobs,
+        jobs::retry_job,
         jobs::job_events,
         // File endpoints
         files::list_files,
         files::get_file,
         files::get_file_content,
         files::delete_file,
+        files::batch_delete_files,
     ),
     components(
         schemas(
@@ -101,6 +104,8 @@ use crate::services::broadcaster::Broadcaster;
             jobs::PaginatedProjectJobsResponse,
             // File schemas
             files::FileResponse,
+            files::BatchDeleteRequest,
+            files::BatchDeleteResponse,
         )
     ),
     tags(
@@ -169,8 +174,10 @@ pub fn create_routes(db: DatabaseConnection, broadcaster: Broadcaster) -> Router
         .route("/projects/{id}/keys/{key_id}", axum::routing::patch(api_keys::update_api_key))
         .route("/projects/{id}/keys/{key_id}", delete(api_keys::delete_api_key))
         .route("/admin/jobs", get(jobs::list_admin_jobs))
+        .route("/admin/jobs/{id}/retry", post(jobs::retry_job))
         .route("/admin/jobs/events", get(jobs::job_events))
         .route("/files", get(files::list_files))
+        .route("/files/batch-delete", post(files::batch_delete_files))
         .route("/files/{id}", get(files::get_file).delete(files::delete_file))
         .route("/files/{id}/content", get(files::get_file_content))
         .layer(middleware::from_fn(auth_middleware));

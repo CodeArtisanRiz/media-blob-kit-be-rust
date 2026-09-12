@@ -4,7 +4,7 @@ use axum::{
     response::Json,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
     QueryOrder, Set, PaginatorTrait, ModelTrait,
 };
 use serde::{Deserialize, Serialize};
@@ -91,6 +91,12 @@ pub async fn create_project(
     auth_user: axum::Extension<AuthUser>,
     Json(payload): Json<CreateProjectRequest>,
 ) -> Result<(StatusCode, Json<ProjectResponse>), AppError> {
+    if let Some(ref s) = payload.settings {
+        let settings_parsed: crate::models::settings::ProjectSettings = serde_json::from_value(s.clone())
+            .map_err(|e| AppError::BadRequest(format!("Invalid settings JSON: {}", e)))?;
+        settings_parsed.validate().map_err(AppError::BadRequest)?;
+    }
+
     let project = project::ActiveModel {
         id: Set(Uuid::new_v4()),
         owner_id: Set(auth_user.id),
@@ -133,8 +139,8 @@ pub async fn list_projects(
     auth_user: axum::Extension<AuthUser>,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<PaginatedResponse<ProjectResponse>>, AppError> {
-    let page = pagination.page.unwrap_or(1);
-    let limit = pagination.limit.unwrap_or(10);
+    let page = pagination.page.unwrap_or(1).max(1);
+    let limit = pagination.limit.unwrap_or(10).max(1);
 
     let paginator = Project::find()
         .filter(project::Column::OwnerId.eq(auth_user.id))
@@ -230,6 +236,9 @@ pub async fn update_project(
                 active_project.description = Set(Some(description));
             }
             if let Some(settings) = payload.settings {
+                let settings_parsed: crate::models::settings::ProjectSettings = serde_json::from_value(settings.clone())
+                    .map_err(|e| AppError::BadRequest(format!("Invalid settings JSON: {}", e)))?;
+                settings_parsed.validate().map_err(AppError::BadRequest)?;
                 active_project.settings = Set(settings);
             }
             active_project.updated_at = Set(chrono::Utc::now().naive_utc());
@@ -508,14 +517,15 @@ pub async fn delete_originals(
 
     // Decrement project storage
     if freed_bytes > 0 {
-        let update_stmt = sea_orm::Statement::from_string(
-            db.get_database_backend(),
-            format!(
-                "UPDATE projects SET storage_used_bytes = GREATEST(0, storage_used_bytes - {}) WHERE id = '{}'",
-                freed_bytes, project_id
-            ),
-        );
-        let _ = db.execute(update_stmt).await;
+        use sea_orm::sea_query::Expr;
+        let _ = project::Entity::update_many()
+            .col_expr(
+                project::Column::StorageUsedBytes,
+                Expr::cust(format!("GREATEST(0, storage_used_bytes - {})", freed_bytes)),
+            )
+            .filter(project::Column::Id.eq(project_id))
+            .exec(&db)
+            .await;
     }
 
     println!(

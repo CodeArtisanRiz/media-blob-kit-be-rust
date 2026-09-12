@@ -3,13 +3,14 @@ use axum::{
     response::Json,
     Extension,
 };
-use sea_orm::{ActiveModelTrait, DatabaseConnection, Set, ConnectionTrait};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::entities::{file, job};
 use crate::error::AppError;
 use crate::middleware::api_key::ProjectContext;
 use crate::services::s3::S3Service;
+use sha2::{Digest, Sha256};
 
 #[derive(Deserialize, utoipa::IntoParams)]
 pub struct UploadImageQuery {
@@ -51,6 +52,79 @@ fn sanitize_bucket_name(name: &str) -> String {
         .collect::<String>()
 }
 
+/// Check storage quota for a project. Returns error if quota exceeded.
+async fn check_storage_quota(
+    db: &DatabaseConnection,
+    project: &ProjectContext,
+    upload_size: i64,
+) -> Result<(), AppError> {
+    use crate::entities::project;
+    let proj = project::Entity::find_by_id(project.id)
+        .one(db)
+        .await
+        .map_err(AppError::DatabaseError)?
+        .ok_or_else(|| AppError::NotFound("Project not found".to_string()))?;
+
+    if proj.storage_used_bytes + upload_size > proj.storage_limit_bytes {
+        return Err(AppError::BadRequest(format!(
+            "Storage quota exceeded: used {} + upload {} > limit {}",
+            proj.storage_used_bytes, upload_size, proj.storage_limit_bytes
+        )));
+    }
+    Ok(())
+}
+
+/// Check transforms quota for a project. Returns error if quota exceeded.
+async fn check_transforms_quota(
+    db: &DatabaseConnection,
+    project: &ProjectContext,
+    transform_count: i64,
+) -> Result<(), AppError> {
+    use crate::entities::project;
+    let proj = project::Entity::find_by_id(project.id)
+        .one(db)
+        .await
+        .map_err(AppError::DatabaseError)?
+        .ok_or_else(|| AppError::NotFound("Project not found".to_string()))?;
+
+    if proj.transforms_used + transform_count > proj.transforms_limit {
+        return Err(AppError::BadRequest(format!(
+            "Transform quota exceeded: used {} + requested {} > limit {}",
+            proj.transforms_used, transform_count, proj.transforms_limit
+        )));
+    }
+    Ok(())
+}
+
+/// Compute SHA-256 hash of data and return hex string.
+fn compute_content_hash(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Check for duplicate file by content hash within a project.
+async fn check_duplicate(
+    db: &DatabaseConnection,
+    project_id: Uuid,
+    content_hash: &str,
+) -> Result<(), AppError> {
+    let existing = file::Entity::find()
+        .filter(file::Column::ProjectId.eq(project_id))
+        .filter(file::Column::ContentHash.eq(content_hash))
+        .one(db)
+        .await
+        .map_err(AppError::DatabaseError)?;
+
+    if let Some(existing_file) = existing {
+        return Err(AppError::Conflict(format!(
+            "Duplicate file detected: existing file id={}",
+            existing_file.id
+        )));
+    }
+    Ok(())
+}
+
 #[utoipa::path(
     post,
     path = "/upload/file",
@@ -60,6 +134,7 @@ fn sanitize_bucket_name(name: &str) -> String {
         (status = 200, description = "File uploaded successfully", body = FileUploadResponse),
         (status = 400, description = "Bad Request"),
         (status = 401, description = "Unauthorized"),
+        (status = 409, description = "Duplicate file"),
         (status = 500, description = "Internal Server Error")
     ),
     security(
@@ -81,6 +156,13 @@ pub async fn upload_file(
             let size = data.len() as i64;
             let ext = get_extension(&filename);
             
+            // Check storage quota
+            check_storage_quota(&db, &project, size).await?;
+
+            // Compute content hash and check for duplicates
+            let content_hash = compute_content_hash(&data);
+            check_duplicate(&db, project.id, &content_hash).await?;
+
             let file_id = Uuid::new_v4();
             // Format: {project_name}-{project_id}/files/{file_id}.{ext}
             let s3_key = format!("{}-{}/files/{}.{}", sanitize_bucket_name(&project.name), project.id, file_id, ext);
@@ -101,19 +183,24 @@ pub async fn upload_file(
                 size: Set(size),
                 status: Set("ready".to_string()),
                 variants_json: Set(serde_json::json!({})),
-                content_hash: Set(None),
+                content_hash: Set(Some(content_hash)),
                 created_at: Set(chrono::Utc::now().naive_utc()),
                 updated_at: Set(chrono::Utc::now().naive_utc()),
             };
             
             let saved_file = file.insert(&db).await.map_err(AppError::DatabaseError)?;
             
-            // Update storage quota tracking for project
-            let update_stmt = sea_orm::Statement::from_string(
-                db.get_database_backend(),
-                format!("UPDATE projects SET storage_used_bytes = storage_used_bytes + {} WHERE id = '{}'", size, project.id),
-            );
-            let _ = db.execute(update_stmt).await;
+            // Update storage quota tracking for project using parameterized update
+            use sea_orm::sea_query::Expr;
+            crate::entities::project::Entity::update_many()
+                .col_expr(
+                    crate::entities::project::Column::StorageUsedBytes,
+                    Expr::col(crate::entities::project::Column::StorageUsedBytes).add(size),
+                )
+                .filter(crate::entities::project::Column::Id.eq(project.id))
+                .exec(&db)
+                .await
+                .map_err(AppError::DatabaseError)?;
 
             // Construct URL
             let url = crate::utils::build_s3_url(&s3_key);
@@ -145,6 +232,7 @@ pub async fn upload_file(
         (status = 200, description = "Image uploaded successfully", body = ImageUploadResponse),
         (status = 400, description = "Bad Request"),
         (status = 401, description = "Unauthorized"),
+        (status = 409, description = "Duplicate file"),
         (status = 500, description = "Internal Server Error")
     ),
     security(
@@ -191,6 +279,13 @@ pub async fn upload_image(
             let data = field.bytes().await.map_err(|_| AppError::InternalServerError("Failed to read file bytes".to_string()))?;
             let size = data.len() as i64;
 
+            // Check storage quota
+            check_storage_quota(&db, &project, size).await?;
+
+            // Compute content hash and check for duplicates
+            let content_hash = compute_content_hash(&data);
+            check_duplicate(&db, project.id, &content_hash).await?;
+
             let file_id = Uuid::new_v4();
             // Format: {project_name}-{project_id}/images/original/{file_id}.{ext}
             let s3_key = format!("{}-{}/images/original/{}.{}", sanitize_bucket_name(&project.name), project.id, file_id, ext);
@@ -234,6 +329,12 @@ pub async fn upload_image(
                     }
                 }
             }
+
+            // Check transforms quota before queuing
+            let transform_count = filtered_variants_config.len() as i64;
+            if transform_count > 0 {
+                check_transforms_quota(&db, &project, transform_count).await?;
+            }
             
             let variants = serde_json::Value::Object(variants_map);
 
@@ -253,19 +354,24 @@ pub async fn upload_image(
                 size: Set(size),
                 status: Set(file_status.to_string()),
                 variants_json: Set(variants.clone()),
-                content_hash: Set(None),
+                content_hash: Set(Some(content_hash)),
                 created_at: Set(chrono::Utc::now().naive_utc()),
                 updated_at: Set(chrono::Utc::now().naive_utc()),
             };
 
             let saved_file = file.insert(&db).await.map_err(AppError::DatabaseError)?;
 
-            // Update storage quota tracking for project
-            let update_stmt = sea_orm::Statement::from_string(
-                db.get_database_backend(),
-                format!("UPDATE projects SET storage_used_bytes = storage_used_bytes + {} WHERE id = '{}'", size, project.id),
-            );
-            let _ = db.execute(update_stmt).await;
+            // Update storage quota tracking for project using parameterized update
+            use sea_orm::sea_query::Expr;
+            crate::entities::project::Entity::update_many()
+                .col_expr(
+                    crate::entities::project::Column::StorageUsedBytes,
+                    Expr::col(crate::entities::project::Column::StorageUsedBytes).add(size),
+                )
+                .filter(crate::entities::project::Column::Id.eq(project.id))
+                .exec(&db)
+                .await
+                .map_err(AppError::DatabaseError)?;
 
             // Only enqueue worker job if raster transformations are configured
             if !is_svg && !filtered_variants_config.is_empty() {

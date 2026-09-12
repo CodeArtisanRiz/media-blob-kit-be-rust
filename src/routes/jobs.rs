@@ -1,17 +1,19 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     Json,
 };
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
-    RelationTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait, Set, IntoActiveModel,
 };
 use serde::{Deserialize, Serialize};
 use crate::entities::job::{self, Entity as Job};
-use crate::entities::file;
+use crate::entities::{file, project, user::Role};
 use crate::error::AppError;
 use crate::middleware::api_key::ProjectContext;
+use crate::middleware::auth::AuthUser;
 use crate::pagination::Pagination;
+use uuid::Uuid;
 
 #[derive(Deserialize)]
 pub struct JobFilter {
@@ -68,8 +70,8 @@ pub async fn list_jobs(
     axum::Extension(project): axum::Extension<ProjectContext>,
     Query(filter): Query<JobFilter>,
 ) -> Result<Json<std::collections::HashMap<String, PaginatedProjectJobsResponse>>, AppError> {
-    let page = filter.pagination.page.unwrap_or(1);
-    let limit = filter.pagination.limit.unwrap_or(10);
+    let page = filter.pagination.page.unwrap_or(1).max(1);
+    let limit = filter.pagination.limit.unwrap_or(10).max(1);
 
     let mut query = Job::find()
         .join(sea_orm::JoinType::InnerJoin, job::Relation::File.def())
@@ -114,8 +116,6 @@ pub struct PaginatedProjectJobsResponse {
     pub page_size: u64,
 }
 
-
-
 #[utoipa::path(
     get,
     path = "/admin/jobs",
@@ -139,9 +139,6 @@ pub async fn list_admin_jobs(
     axum::Extension(user): axum::Extension<crate::middleware::auth::AuthUser>,
     Query(filter): Query<JobFilter>,
 ) -> Result<Json<std::collections::HashMap<String, PaginatedProjectJobsResponse>>, AppError> {
-    use crate::entities::{project, user::Role};
-    use sea_orm::QuerySelect;
-
     // 1. Fetch projects based on role
     let projects = match user.role {
         Role::Su => project::Entity::find().all(&db).await.map_err(AppError::DatabaseError)?,
@@ -184,8 +181,8 @@ pub async fn list_admin_jobs(
         }
     }
 
-    let page = filter.pagination.page.unwrap_or(1);
-    let limit = filter.pagination.limit.unwrap_or(10);
+    let page = filter.pagination.page.unwrap_or(1).max(1);
+    let limit = filter.pagination.limit.unwrap_or(10).max(1);
 
     for p in projects {
         let all_jobs = project_jobs.remove(&p.id).unwrap_or_default();
@@ -217,6 +214,74 @@ pub async fn list_admin_jobs(
     Ok(Json(result))
 }
 
+#[utoipa::path(
+    post,
+    path = "/admin/jobs/{id}/retry",
+    tag = "Jobs",
+    params(
+        ("id" = Uuid, Path, description = "Job ID to retry")
+    ),
+    responses(
+        (status = 200, description = "Job queued for retry", body = JobResponse),
+        (status = 400, description = "Job cannot be retried (not failed or max retries reached)"),
+        (status = 404, description = "Job not found"),
+        (status = 500, description = "Internal Server Error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn retry_job(
+    State(db): State<DatabaseConnection>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(job_id): Path<Uuid>,
+) -> Result<Json<JobResponse>, AppError> {
+    let job_model = Job::find_by_id(job_id)
+        .one(&db)
+        .await
+        .map_err(AppError::DatabaseError)?
+        .ok_or_else(|| AppError::NotFound("Job not found".to_string()))?;
+
+    // Check project ownership
+    if user.role != Role::Su {
+        let file_model = file::Entity::find_by_id(job_model.file_id)
+            .one(&db)
+            .await
+            .map_err(AppError::DatabaseError)?
+            .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
+
+        let proj = project::Entity::find_by_id(file_model.project_id)
+            .one(&db)
+            .await
+            .map_err(AppError::DatabaseError)?
+            .ok_or_else(|| AppError::NotFound("Project not found".to_string()))?;
+
+        if proj.owner_id != user.id {
+            return Err(AppError::Forbidden("Access denied to this job".to_string()));
+        }
+    }
+
+    if job_model.status != "failed" {
+        return Err(AppError::BadRequest("Only failed jobs can be retried".to_string()));
+    }
+
+    if job_model.attempt_count >= job_model.max_retries {
+        return Err(AppError::BadRequest(format!(
+            "Job has reached maximum retry attempts ({}/{})",
+            job_model.attempt_count, job_model.max_retries
+        )));
+    }
+
+    let mut active: job::ActiveModel = job_model.into_active_model();
+    active.status = Set("pending".to_string());
+    active.attempt_count = Set(active.attempt_count.unwrap() + 1);
+    active.updated_at = Set(chrono::Utc::now().naive_utc());
+
+    let updated = active.update(&db).await.map_err(AppError::DatabaseError)?;
+    println!("Job | POST /admin/jobs/{}/retry | user={} | res=200", job_id, user.username);
+    Ok(Json(JobResponse::from(updated)))
+}
+
 use axum::response::sse::{Event, Sse};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use std::convert::Infallible;
@@ -235,10 +300,12 @@ use crate::services::broadcaster::Broadcaster;
     )
 )]
 pub async fn job_events(
+    axum::Extension(_user): axum::Extension<AuthUser>,
     axum::Extension(broadcaster): axum::Extension<Broadcaster>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let rx = broadcaster.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|msg| {
+
+    let stream = BroadcastStream::new(rx).filter_map(move |msg| {
         match msg {
             Ok(job) => {
                 let data = serde_json::to_string(&job).ok()?;

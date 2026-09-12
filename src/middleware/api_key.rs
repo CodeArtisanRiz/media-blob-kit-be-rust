@@ -1,15 +1,19 @@
 use axum::{
     extract::Request,
-    http::HeaderMap,
+    http::{header, HeaderMap},
     middleware::Next,
     response::Response,
 };
+use jsonwebtoken::{decode, DecodingKey, Validation};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::config::get_config;
 use crate::entities::api_key::{self, Entity as ApiKey};
-use crate::entities::project::Entity as Project;
+use crate::entities::project::{self, Entity as Project};
+use crate::entities::user;
 use crate::error::AppError;
 use crate::models::settings::ProjectSettings;
 
@@ -18,6 +22,14 @@ pub struct ProjectContext {
     pub id: Uuid,
     pub name: String,
     pub settings: ProjectSettings,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Claims {
+    sub: String,
+    exp: usize,
+    role: user::Role,
+    user_id: Uuid,
 }
 
 pub async fn api_key_auth(
@@ -29,69 +41,168 @@ pub async fn api_key_auth(
     let method = request.method().to_string();
     let uri = request.uri().to_string();
 
-    let api_key_header = match headers.get("x-api-key") {
-        Some(header) => header.to_str().map_err(|_| {
-            println!("Auth | {} {} | res=401 | Invalid API Key format", method, uri);
-            AppError::Unauthorized("Invalid API Key format".to_string())
-        })?,
-        None => {
-            println!("Auth | {} {} | res=401 | Missing x-api-key header", method, uri);
-            return Err(AppError::Unauthorized("Missing x-api-key header".to_string()));
-        }
+    // 1. Check for external client API Key: x-api-key header or ?api_key= query parameter
+    let raw_api_key = if let Some(header_val) = headers.get("x-api-key").and_then(|h| h.to_str().ok()) {
+        Some(header_val.to_string())
+    } else if let Some(query_str) = request.uri().query() {
+        query_str.split('&').find_map(|pair| {
+            let mut parts = pair.split('=');
+            if parts.next() == Some("api_key") || parts.next() == Some("key") {
+                parts.next().map(|v| v.to_string())
+            } else {
+                None
+            }
+        })
+    } else {
+        None
     };
 
-    let mut hasher = Sha256::new();
-    hasher.update(api_key_header.as_bytes());
-    let key_hash = format!("{:x}", hasher.finalize());
+    if let Some(key_str) = raw_api_key {
+        let mut hasher = Sha256::new();
+        hasher.update(key_str.as_bytes());
+        let key_hash = format!("{:x}", hasher.finalize());
 
-    // Find API Key and related Project by SHA-256 hash
-    let result = ApiKey::find()
-        .filter(api_key::Column::KeyHash.eq(&key_hash))
-        .find_also_related(Project)
-        .one(&db)
-        .await
-        .map_err(AppError::DatabaseError)?;
+        let result = ApiKey::find()
+            .filter(api_key::Column::KeyHash.eq(&key_hash))
+            .find_also_related(Project)
+            .one(&db)
+            .await
+            .map_err(AppError::DatabaseError)?;
 
-    let (api_key, project) = match result {
-        Some(r) => r,
-        None => {
+        if let Some((api_key, project)) = result {
+            let project = match project {
+                Some(p) => p,
+                None => {
+                    println!("Auth | {} {} | res=500 | Orphaned API Key", method, uri);
+                    return Err(AppError::InternalServerError("Orphaned API Key".to_string()));
+                }
+            };
+
+            if !api_key.is_active {
+                println!("Auth | {} {} | project={} | res=401 | API Key is inactive", method, uri, project.name);
+                return Err(AppError::Unauthorized("API Key is inactive".to_string()));
+            }
+
+            if let Some(expires_at) = api_key.expires_at {
+                if expires_at < chrono::Utc::now().naive_utc() {
+                    println!("Auth | {} {} | project={} | res=401 | API Key has expired", method, uri, project.name);
+                    return Err(AppError::Unauthorized("API Key has expired".to_string()));
+                }
+            }
+
+            let settings: ProjectSettings = serde_json::from_value(project.settings.clone())
+                .map_err(|e| {
+                    eprintln!("Failed to parse project settings: {}", e);
+                    e
+                })
+                .unwrap_or_default();
+
+            request.extensions_mut().insert(ProjectContext {
+                id: project.id,
+                name: project.name,
+                settings,
+            });
+
+            return Ok(next.run(request).await);
+        } else {
             println!("Auth | {} {} | res=401 | Invalid API Key", method, uri);
             return Err(AppError::Unauthorized("Invalid API Key".to_string()));
         }
-    };
-
-    let project = match project {
-        Some(p) => p,
-        None => {
-            println!("Auth | {} {} | res=500 | Orphaned API Key", method, uri);
-            return Err(AppError::InternalServerError("Orphaned API Key".to_string()));
-        }
-    };
-
-    if !api_key.is_active {
-        println!("Auth | {} {} | project={} | res=401 | API Key is inactive", method, uri, project.name);
-        return Err(AppError::Unauthorized("API Key is inactive".to_string()));
     }
 
-    if let Some(expires_at) = api_key.expires_at {
-        if expires_at < chrono::Utc::now().naive_utc() {
-            println!("Auth | {} {} | project={} | res=401 | API Key has expired", method, uri, project.name);
-            return Err(AppError::Unauthorized("API Key has expired".to_string()));
+    // 2. Check for Web Dashboard User Session: Authorization: Bearer <jwt> or ?token= query
+    let auth_header = headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok());
+    let jwt_token = if let Some(auth) = auth_header {
+        if auth.starts_with("Bearer ") {
+            Some(auth[7..].to_string())
+        } else {
+            None
         }
-    }
-
-    let settings: ProjectSettings = serde_json::from_value(project.settings.clone())
-        .map_err(|e| {
-            eprintln!("Failed to parse project settings: {}", e);
-            e
+    } else if let Some(query_str) = request.uri().query() {
+        query_str.split('&').find_map(|pair| {
+            let mut parts = pair.split('=');
+            if parts.next() == Some("token") {
+                parts.next().map(|v| v.to_string())
+            } else {
+                None
+            }
         })
-        .unwrap_or_default();
+    } else {
+        None
+    };
 
-    request.extensions_mut().insert(ProjectContext {
-        id: project.id,
-        name: project.name,
-        settings,
-    });
+    if let Some(token) = jwt_token {
+        let token_data = decode::<Claims>(
+            &token,
+            &DecodingKey::from_secret(get_config().jwt_secret.as_ref()),
+            &Validation::default(),
+        )
+        .map_err(|e| {
+            eprintln!("JWT decode error: {}", e);
+            AppError::Unauthorized("Invalid or expired session token".to_string())
+        })?;
 
-    Ok(next.run(request).await)
+        let user_id = token_data.claims.user_id;
+        let user_role = token_data.claims.role;
+
+        // Parse target project ID from x-project-id header or ?project_id= query param
+        let query_str = request.uri().query().unwrap_or("");
+        let target_project_id = headers.get("x-project-id")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .or_else(|| {
+                query_str.split('&').find_map(|pair| {
+                    let mut parts = pair.split('=');
+                    if parts.next() == Some("project_id") {
+                        parts.next().and_then(|v| Uuid::parse_str(v).ok())
+                    } else {
+                        None
+                    }
+                })
+            });
+
+        let found_project = if let Some(proj_id) = target_project_id {
+            let mut query = Project::find_by_id(proj_id)
+                .filter(project::Column::DeletedAt.is_null());
+
+            if user_role != user::Role::Su {
+                query = query.filter(project::Column::OwnerId.eq(user_id));
+            }
+
+            query.one(&db).await.map_err(AppError::DatabaseError)?
+        } else {
+            // Default to first active project owned by user
+            let mut query = Project::find()
+                .filter(project::Column::DeletedAt.is_null());
+
+            if user_role != user::Role::Su {
+                query = query.filter(project::Column::OwnerId.eq(user_id));
+            }
+
+            query.one(&db).await.map_err(AppError::DatabaseError)?
+        };
+
+        if let Some(project) = found_project {
+            let settings: ProjectSettings = serde_json::from_value(project.settings.clone())
+                .map_err(|e| {
+                    eprintln!("Failed to parse project settings: {}", e);
+                    e
+                })
+                .unwrap_or_default();
+
+            request.extensions_mut().insert(ProjectContext {
+                id: project.id,
+                name: project.name,
+                settings,
+            });
+
+            return Ok(next.run(request).await);
+        } else {
+            println!("Auth | {} {} | user={} | res=404 | No matching project found for user", method, uri, user_id);
+            return Err(AppError::NotFound("Project not found or access denied".to_string()));
+        }
+    }
+
+    println!("Auth | {} {} | res=401 | Missing x-api-key or session authorization", method, uri);
+    Err(AppError::Unauthorized("Missing x-api-key header or valid session authorization".to_string()))
 }

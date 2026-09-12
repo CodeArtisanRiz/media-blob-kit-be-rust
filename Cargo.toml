@@ -39,6 +39,14 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 [workspace]
 members = [".", "migration"]
 
+[profile.release]
+opt-level = 3
+lto = false           # Disabling LTO saves massive amounts of linking time
+codegen-units = 16    # Parallelize code generation
+debug = false
+debug-assertions = false
+overflow-checks = false
+
 [[bin]]
 name = "reset_db"
 path = "utils/reset_db.rs"

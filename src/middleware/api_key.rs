@@ -46,9 +46,11 @@ pub async fn api_key_auth(
         Some(header_val.to_string())
     } else if let Some(query_str) = request.uri().query() {
         query_str.split('&').find_map(|pair| {
-            let mut parts = pair.split('=');
-            if parts.next() == Some("api_key") || parts.next() == Some("key") {
-                parts.next().map(|v| v.to_string())
+            let mut parts = pair.splitn(2, '=');
+            let key = parts.next()?;
+            let value = parts.next()?;
+            if key == "api_key" || key == "key" {
+                Some(value.to_string())
             } else {
                 None
             }

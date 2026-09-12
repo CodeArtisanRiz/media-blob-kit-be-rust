@@ -290,10 +290,15 @@ impl Worker {
             .map_err(|e| e.to_string())?
             .ok_or("Project not found")?;
 
+        // Parse project settings for keep_original flag
+        let settings: crate::models::settings::ProjectSettings = serde_json::from_value(project.settings.clone())
+            .unwrap_or_default();
+
         // Download original file
         let original_data = self.s3.get_object(&file.s3_key).await.map_err(|e| e.to_string())?;
 
         let mut successful_variants = serde_json::Map::new();
+        let mut total_variant_bytes: i64 = 0;
 
         // Process each variant
         for (variant_name, config) in variants {
@@ -326,6 +331,9 @@ impl Worker {
                 ext
             );
 
+            // Track variant size for storage quota
+            total_variant_bytes += processed_data.len() as i64;
+
             // Upload to S3
             self.s3.put_object(&s3_key, processed_data, &mime_type).await.map_err(|e| e.to_string())?;
             
@@ -342,13 +350,35 @@ impl Worker {
         file_active.updated_at = Set(chrono::Utc::now().naive_utc());
         file_active.update(&self.db).await.map_err(|e| e.to_string())?;
 
-        // Update Project transforms_used counter
-        if transform_count > 0 {
+        // Update Project transforms_used counter AND add variant storage
+        if transform_count > 0 || total_variant_bytes > 0 {
             let update_stmt = sea_orm::Statement::from_string(
                 self.db.get_database_backend(),
-                format!("UPDATE projects SET transforms_used = transforms_used + {} WHERE id = '{}'", transform_count, project.id),
+                format!(
+                    "UPDATE projects SET transforms_used = transforms_used + {}, storage_used_bytes = storage_used_bytes + {} WHERE id = '{}'",
+                    transform_count, total_variant_bytes, project.id
+                ),
             );
             let _ = self.db.execute(update_stmt).await;
+        }
+
+        // If keep_original is false and all variants processed successfully, delete original from S3
+        if !settings.keep_original && transform_count > 0 {
+            println!("keep_original=false for project '{}', deleting original: {}", project.name, file.s3_key);
+            if let Err(e) = self.s3.delete_object(&file.s3_key).await {
+                eprintln!("Failed to delete original after variant processing: {}", e);
+                // Non-fatal: variants are ready, original deletion is best-effort
+            } else {
+                // Decrement storage by original file size
+                let decrement_stmt = sea_orm::Statement::from_string(
+                    self.db.get_database_backend(),
+                    format!(
+                        "UPDATE projects SET storage_used_bytes = GREATEST(0, storage_used_bytes - {}) WHERE id = '{}'",
+                        file.size, project.id
+                    ),
+                );
+                let _ = self.db.execute(decrement_stmt).await;
+            }
         }
 
         Ok(())

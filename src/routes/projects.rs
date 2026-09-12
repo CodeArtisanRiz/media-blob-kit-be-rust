@@ -4,7 +4,7 @@ use axum::{
     response::Json,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
     QueryOrder, Set, PaginatorTrait, ModelTrait,
 };
 use serde::{Deserialize, Serialize};
@@ -421,5 +421,109 @@ pub async fn sync_variants(
     Ok(Json(serde_json::json!({
         "message": format!("Triggered regeneration for {} image(s)", count),
         "jobs_queued": count
+    })))
+}
+
+/// Delete all original images from S3 for a project (only when keep_original is false).
+/// Variants remain intact. This is a destructive operation.
+#[utoipa::path(
+    post,
+    path = "/projects/{id}/delete-originals",
+    params(
+        ("id" = Uuid, Path, description = "Project ID")
+    ),
+    responses(
+        (status = 200, description = "Originals deleted successfully"),
+        (status = 400, description = "keep_original is enabled — disable it first"),
+        (status = 404, description = "Project not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    ),
+    tag = "Project Management"
+)]
+pub async fn delete_originals(
+    State(db): State<DatabaseConnection>,
+    auth_user: axum::Extension<AuthUser>,
+    Path(project_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let project = Project::find_by_id(project_id)
+        .filter(project::Column::OwnerId.eq(auth_user.id))
+        .filter(project::Column::DeletedAt.is_null())
+        .one(&db)
+        .await?;
+
+    let project = match project {
+        Some(p) => p,
+        None => return Err(AppError::NotFound("Project not found".to_string())),
+    };
+
+    // Verify keep_original is false
+    let settings: crate::models::settings::ProjectSettings = serde_json::from_value(project.settings.clone())
+        .unwrap_or_default();
+
+    if settings.keep_original {
+        return Err(AppError::BadRequest(
+            "Cannot delete originals while keep_original is enabled. Disable it in project settings first.".to_string()
+        ));
+    }
+
+    let s3_service = S3Service::new().await;
+
+    // Find all image files with 'ready' status (variants have been processed)
+    let files = file::Entity::find()
+        .filter(file::Column::ProjectId.eq(project_id))
+        .filter(file::Column::MimeType.starts_with("image/"))
+        .filter(file::Column::Status.eq("ready"))
+        .all(&db)
+        .await?;
+
+    let mut deleted_count = 0u64;
+    let mut freed_bytes: i64 = 0;
+
+    for f in &files {
+        // Only delete if the file has variants (originals without variants should be kept)
+        let has_variants = f.variants_json.as_object()
+            .map(|obj| !obj.is_empty())
+            .unwrap_or(false);
+
+        if !has_variants {
+            continue;
+        }
+
+        // Attempt to delete original from S3
+        match s3_service.delete_object(&f.s3_key).await {
+            Ok(_) => {
+                deleted_count += 1;
+                freed_bytes += f.size;
+            }
+            Err(e) => {
+                eprintln!("Failed to delete original {}: {}", f.s3_key, e);
+            }
+        }
+    }
+
+    // Decrement project storage
+    if freed_bytes > 0 {
+        let update_stmt = sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            format!(
+                "UPDATE projects SET storage_used_bytes = GREATEST(0, storage_used_bytes - {}) WHERE id = '{}'",
+                freed_bytes, project_id
+            ),
+        );
+        let _ = db.execute(update_stmt).await;
+    }
+
+    println!(
+        "Project | POST /projects/{}/delete-originals | user={} | deleted={} | freed={} | res=200",
+        project_id, auth_user.username, deleted_count, freed_bytes
+    );
+
+    Ok(Json(serde_json::json!({
+        "message": format!("Deleted {} original images, freed {} bytes", deleted_count, freed_bytes),
+        "deleted_count": deleted_count,
+        "freed_bytes": freed_bytes
     })))
 }

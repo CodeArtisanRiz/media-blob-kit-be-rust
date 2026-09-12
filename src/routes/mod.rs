@@ -43,6 +43,7 @@ use crate::services::broadcaster::Broadcaster;
         projects::delete_project,
         projects::restore_project,
         projects::sync_variants,
+        projects::delete_originals,
         // API Key endpoints
         api_keys::create_api_key,
         api_keys::list_api_keys,
@@ -157,6 +158,7 @@ pub fn create_routes(db: DatabaseConnection, broadcaster: Broadcaster) -> Router
         .route("/projects/{id}", delete(projects::delete_project))
         .route("/projects/{id}/restore", post(projects::restore_project))
         .route("/projects/{id}/sync-variants", post(projects::sync_variants))
+        .route("/projects/{id}/delete-originals", post(projects::delete_originals))
         .route("/projects/{id}/keys", post(api_keys::create_api_key))
         .route("/projects/{id}/keys", get(api_keys::list_api_keys))
         .route("/projects/{id}/keys/{key_id}", axum::routing::patch(api_keys::update_api_key))

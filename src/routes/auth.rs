@@ -37,6 +37,7 @@ pub struct RefreshRequest {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct RefreshResponse {
     access_token: String,
+    refresh_token: String,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -221,6 +222,8 @@ pub async fn refresh(
         })?
         .ok_or(AppError::Unauthorized("User not found. Please re-login.".to_string()))?;
 
+    let user_id_val = user.id;
+
     // Mark token as used
     let mut active_token = refresh_token.into_active_model();
     active_token.revoked = Set(true);
@@ -248,8 +251,27 @@ pub async fn refresh(
             AppError::InternalServerError("Failed to generate token".to_string())
         })?;
 
+    // Generate new refresh token (rotation)
+    let new_refresh_token_str = generate_refresh_token();
+    let new_refresh_token_hash = hash_token(&new_refresh_token_str);
+    let new_expires_at = chrono::Utc::now() + chrono::Duration::days(1);
+
+    let new_refresh_token = refresh_token::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        user_id: Set(user_id_val),
+        token_hash: Set(new_refresh_token_hash),
+        expires_at: Set(new_expires_at.naive_utc()),
+        created_at: Set(chrono::Utc::now().naive_utc()),
+        revoked: Set(false),
+    };
+
+    new_refresh_token.insert(&db).await.map_err(|e| {
+        eprintln!("Refresh token rotation DB error: {}", e);
+        AppError::DatabaseError(e)
+    })?;
+
     println!("Auth | POST /auth/refresh | user={} | res=200", username);
-    Ok(Json(RefreshResponse { access_token: token }))
+    Ok(Json(RefreshResponse { access_token: token, refresh_token: new_refresh_token_str }))
 }
 
 #[utoipa::path(

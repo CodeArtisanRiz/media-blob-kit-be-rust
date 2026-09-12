@@ -16,8 +16,8 @@ pub async fn require_su(
         .get::<AuthUser>()
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if auth_user.role != Role::Su {
-        eprintln!("Access denied: user '{}' is not superuser", auth_user.username);
+    if auth_user.role != Role::Su && auth_user.role != Role::Admin {
+        eprintln!("Access denied: user '{}' is not superuser or admin", auth_user.username);
         return Err(StatusCode::FORBIDDEN);
     }
 

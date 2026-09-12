@@ -5,7 +5,7 @@ use axum::{
 };
 use sea_orm::{
     DatabaseConnection, EntityTrait, ActiveModelTrait, Set, ModelTrait, PaginatorTrait,
-    QueryOrder,
+    QueryOrder, IntoActiveModel,
 };
 use serde::{Deserialize, Serialize};
 use argon2::{
@@ -21,12 +21,18 @@ use crate::error::AppError;
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateUserRequest {
-    username: String,
-    password: String,
-    role: UserRole,
+    pub username: String,
+    pub password: String,
+    pub role: UserRole,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
+pub struct UpdateUserRequest {
+    pub password: Option<String>,
+    pub role: Option<UserRole>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum UserRole {
     Admin,
@@ -45,10 +51,10 @@ impl From<UserRole> for user::Role {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct UserResponse {
     #[schema(value_type = String)]
-    id: Uuid,
-    username: String,
-    role: user::Role,
-    created_at: chrono::NaiveDateTime,
+    pub id: Uuid,
+    pub username: String,
+    pub role: user::Role,
+    pub created_at: chrono::NaiveDateTime,
 }
 
 impl From<user::Model> for UserResponse {
@@ -81,8 +87,6 @@ pub async fn create_user(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     Json(payload): Json<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<UserResponse>), AppError> {
-
-
     // Hash password
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
@@ -140,8 +144,6 @@ pub async fn list_users(
     _auth_user: axum::Extension<AuthUser>,
     Query(pagination): Query<Pagination>,
 ) -> Result<Json<PaginatedResponse<UserResponse>>, AppError> {
-
-
     let page = pagination.page.unwrap_or(1);
     let limit = pagination.limit.unwrap_or(10);
 
@@ -156,6 +158,65 @@ pub async fn list_users(
     
     println!("User | GET /users | user={} | count={} | res=200", _auth_user.username, total_items);
     Ok(Json(PaginatedResponse::new(user_responses, total_items, page, limit)))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/users/{id}",
+    params(
+        ("id" = String, Path, description = "User ID to update")
+    ),
+    request_body = UpdateUserRequest,
+    responses(
+        (status = 200, description = "User updated successfully", body = UserResponse),
+        (status = 404, description = "User not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    ),
+    tag = "User Management"
+)]
+pub async fn update_user(
+    State(db): State<DatabaseConnection>,
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Path(user_id): Path<Uuid>,
+    Json(payload): Json<UpdateUserRequest>,
+) -> Result<Json<UserResponse>, AppError> {
+    let user = User::find_by_id(user_id)
+        .one(&db)
+        .await
+        .map_err(AppError::DatabaseError)?;
+
+    let user = match user {
+        Some(u) => u,
+        None => return Err(AppError::NotFound("User not found".to_string())),
+    };
+
+    let mut active_user = user.into_active_model();
+
+    if let Some(role) = payload.role {
+        active_user.role = Set(role.into());
+    }
+
+    if let Some(pwd) = payload.password {
+        if !pwd.trim().is_empty() {
+            let salt = SaltString::generate(&mut OsRng);
+            let argon2 = Argon2::default();
+            let password_hash = argon2
+                .hash_password(pwd.as_bytes(), &salt)
+                .map_err(|e| {
+                    eprintln!("Password hash error: {}", e);
+                    AppError::InternalServerError("Password hashing failed".to_string())
+                })?
+                .to_string();
+            active_user.password = Set(password_hash);
+        }
+    }
+
+    let updated = active_user.update(&db).await.map_err(AppError::DatabaseError)?;
+    println!("User | PATCH /users/{} | user={} | res=200", user_id, auth_user.username);
+    Ok(Json(UserResponse::from(updated)))
 }
 
 #[utoipa::path(
@@ -180,7 +241,6 @@ pub async fn delete_user(
     axum::Extension(auth_user): axum::Extension<AuthUser>,
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-
     // Prevent deleting self
     if auth_user.id == user_id {
         println!("User | DELETE /users/{} | user={} | res=400 | Cannot delete yourself", user_id, auth_user.username);

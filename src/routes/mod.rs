@@ -168,10 +168,11 @@ pub fn create_routes(db: DatabaseConnection, broadcaster: Broadcaster) -> Router
         .route("/files/{id}/content", get(files::get_file_content))
         .layer(middleware::from_fn(auth_middleware));
 
-    // Su-only routes
+    // Su and Admin user management routes
     let su_routes = Router::new()
         .route("/users", post(users::create_user))
         .route("/users", get(users::list_users))
+        .route("/users/{id}", axum::routing::patch(users::update_user))
         .route("/users/{id}", delete(users::delete_user))
         .layer(middleware::from_fn(require_su))
         .layer(middleware::from_fn(auth_middleware));

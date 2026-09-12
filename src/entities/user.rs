@@ -16,6 +16,7 @@ pub struct Model {
 
 #[derive(EnumIter, DeriveActiveEnum, Clone, Debug, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
 #[sea_orm(rs_type = "String", db_type = "String(StringLen::None)")]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     #[sea_orm(string_value = "su")]
     Su,

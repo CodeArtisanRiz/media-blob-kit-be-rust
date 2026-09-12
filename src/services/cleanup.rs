@@ -17,6 +17,8 @@ impl CleanupService {
     pub async fn run_scheduler(self) {
         println!("Cleanup Scheduler | Started");
         let mut interval = tokio::time::interval(Duration::from_secs(86400)); // Run once a day
+        
+        let mut last_reset_month = 0;
 
         loop {
             interval.tick().await;
@@ -31,9 +33,12 @@ impl CleanupService {
             }
 
             // On the 1st of the month, reset monthly transforms used
-            if Utc::now().day() == 1 {
+            let now = Utc::now();
+            if now.day() == 1 && now.month() != last_reset_month {
                 if let Err(e) = self.reset_monthly_transforms().await {
                     eprintln!("Cleanup Scheduler | Error resetting monthly transforms: {}", e);
+                } else {
+                    last_reset_month = now.month();
                 }
             }
         }
